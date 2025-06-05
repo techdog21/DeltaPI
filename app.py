@@ -2,10 +2,16 @@ from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 import sqlite3
 import json
+import os
 
 app = Flask(__name__)
-DB_PATH = "vedirect.db"
 
+# Database setup
+DB_DIR = "/var/data/vedirect"
+DB_PATH = os.path.join(DB_DIR, "vedirect.db")
+os.makedirs(DB_DIR, exist_ok=True)
+
+# Charge mode mapping
 CS_MAP = {
     "0": "Off",
     "1": "Low Power",
@@ -79,10 +85,10 @@ def index():
         except:
             continue
 
-    timestamps = [x[0] for x in parsed]
-    voltages = [x[1] for x in parsed]
-    currents = [x[2] for x in parsed]
-    powers = [x[3] for x in parsed]
+    timestamps = [p[0] for p in parsed]
+    voltages = [p[1] for p in parsed]
+    currents = [p[2] for p in parsed]
+    powers = [p[3] for p in parsed]
 
     html = """
     <html>
@@ -120,51 +126,57 @@ def index():
     html += """
             </table>
         </div>
-        <script>
-            const ctx = document.getElementById('chart').getContext('2d');
-            const chart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: """ + json.dumps(timestamps) + """,
-                    datasets: [
-                        {
-                            label: 'Battery Voltage (V)',
-                            data: """ + json.dumps(voltages) + """,
-                            borderColor: 'blue',
-                            fill: false,
-                            tension: 0.1
-                        },
-                        {
-                            label: 'Battery Current (A)',
-                            data: """ + json.dumps(currents) + """,
-                            borderColor: 'green',
-                            fill: false,
-                            tension: 0.1
-                        },
-                        {
-                            label: 'Solar Power (W)',
-                            data: """ + json.dumps(powers) + """,
-                            borderColor: 'orange',
-                            fill: false,
-                            tension: 0.1
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    plugins: {
-                        legend: { position: 'top' }
-                    },
-                    scales: {
-                        x: { display: true, title: { display: true, text: 'Timestamp' } },
-                        y: { beginAtZero: true, title: { display: true, text: 'Value' } }
-                    }
-                }
-            });
-        </script>
-    </body>
-    </html>
     """
+
+    if len(timestamps) >= 2:
+        html += f"""
+        <script>
+        const ctx = document.getElementById('chart').getContext('2d');
+        const chart = new Chart(ctx, {{
+            type: 'line',
+            data: {{
+                labels: {json.dumps(timestamps)},
+                datasets: [
+                    {{
+                        label: 'Battery Voltage (V)',
+                        data: {json.dumps(voltages)},
+                        borderColor: 'blue',
+                        fill: false,
+                        tension: 0.1
+                    }},
+                    {{
+                        label: 'Battery Current (A)',
+                        data: {json.dumps(currents)},
+                        borderColor: 'green',
+                        fill: false,
+                        tension: 0.1
+                    }},
+                    {{
+                        label: 'Solar Power (W)',
+                        data: {json.dumps(powers)},
+                        borderColor: 'orange',
+                        fill: false,
+                        tension: 0.1
+                    }}
+                ]
+            }},
+            options: {{
+                responsive: true,
+                plugins: {{
+                    legend: {{ position: 'top' }}
+                }},
+                scales: {{
+                    x: {{ display: true, title: {{ display: true, text: 'Timestamp' }} }},
+                    y: {{ beginAtZero: true, title: {{ display: true, text: 'Value' }} }}
+                }}
+            }}
+        }});
+        </script>
+        """
+    else:
+        html += "<p><strong>Waiting for more data to display the graph...</strong></p>"
+
+    html += "</body></html>"
     return html
 
 @app.route("/latest")
@@ -183,32 +195,6 @@ def latest():
         return jsonify({"error": "No data"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-@app.route("/debug")
-def debug():
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            rows = conn.execute(
-                "SELECT id, timestamp, received, data FROM logs ORDER BY id DESC LIMIT 5"
-            ).fetchall()
-    except Exception as e:
-        return f"<p>Error reading database: {e}</p>"
-
-    html = "<h2>Debug: Last 5 Entries</h2><pre>\n"
-    for row in rows:
-        db_ts = row[1]
-        try:
-            data = json.loads(row[3])
-            json_ts = data.get("timestamp", "N/A")
-            v = int(data.get("V", 0)) / 1000
-            i = int(data.get("I", 0)) / 1000
-        except:
-            json_ts = "Parse error"
-            v = i = "?"
-        html += f"ID: {row[0]}\nDB timestamp: {db_ts}\nJSON timestamp: {json_ts}\nV: {v} V, I: {i} A\n---\n"
-
-    html += "</pre>"
-    return html
 
 if __name__ == "__main__":
     app.run()
