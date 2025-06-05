@@ -64,6 +64,9 @@ def latest():
 @app.route("/")
 def index():
     try:
+        now = datetime.datetime.utcnow()
+        since = now - datetime.timedelta(hours=24)
+
         with sqlite3.connect(DB_PATH) as conn:
             rows = conn.execute(
                 "SELECT timestamp, received, data FROM logs WHERE timestamp >= ? ORDER BY timestamp ASC",
@@ -73,7 +76,7 @@ def index():
         return f"<p>Error reading database: {e}</p>"
 
     parsed = []
-    for row in reversed(rows):
+    for row in rows:
         try:
             data = json.loads(row[2])
             v = int(data.get("V", 0)) / 1000
@@ -90,7 +93,7 @@ def index():
     html = """
     <html>
     <head>
-        <title>VE.Direct Dashboard</title>
+        <title>VE.Direct Dashboard - 24 Hours</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <style>
@@ -127,7 +130,7 @@ def index():
         </style>
     </head>
     <body>
-        <h2>VE.Direct Solar Data</h2>
+        <h2>VE.Direct Solar Data (Last 24 Hours)</h2>
 
         <div id="chart-container">
             <canvas id="chart"></canvas>
@@ -185,6 +188,7 @@ def index():
     """
 
     return html
+
 
 if __name__ == "__main__":
     app.run()
