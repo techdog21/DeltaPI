@@ -67,80 +67,79 @@ def index():
     except Exception as e:
         return f"<p>Error reading database: {e}</p>"
 
-    # Parse rows
+    # Parse and reverse rows (oldest first)
     parsed = []
-    for row in reversed(rows):  # oldest first
+    for row in reversed(rows):
         try:
             data = json.loads(row[2])
-            v = int(data.get("V", 0)) / 1000  # convert mV to V
-            i = int(data.get("I", 0)) / 1000  # convert mA to A
+            v = int(data.get("V", 0)) / 1000  # mV → V
+            i = int(data.get("I", 0)) / 1000  # mA → A
             ts = data.get("timestamp", row[0])
             parsed.append((ts, v, i))
-        except Exception as e:
+        except:
             continue
 
-# Build HTML
-html = """
-<html><head><title>VE.Direct Logs</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-</head><body>
-<h1>Latest Solar Readings</h1>
+    # Prepare chart data
+    timestamps = [x[0] for x in parsed]
+    voltages = [x[1] for x in parsed]
+    currents = [x[2] for x in parsed]
 
-<!-- Chart first -->
-<canvas id='chart' width='600' height='300'></canvas><br><br>
+    # Begin HTML
+    html = """
+    <html><head><title>VE.Direct Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: sans-serif; margin: 2em; }
+        table { border-collapse: collapse; margin-top: 2em; }
+        th, td { border: 1px solid #ccc; padding: 6px 12px; }
+        th { background-color: #eee; }
+    </style>
+    </head><body>
+    <h1>VE.Direct Solar Data</h1>
 
-<!-- Table second -->
-<table border="1" cellpadding="5">
-<tr><th>Timestamp</th><th>Voltage (V)</th><th>Current (A)</th></tr>
-"""
-for ts, v, i in parsed:
-    html += f"<tr><td>{ts}</td><td>{v:.2f}</td><td>{i:.2f}</td></tr>"
-html += "</table>"
+    <!-- Chart at top -->
+    <canvas id="chart" width="800" height="300"></canvas>
 
-# JavaScript for Chart.js
-timestamps = [x[0] for x in parsed]
-voltages = [x[1] for x in parsed]
-currents = [x[2] for x in parsed]
+    <script>
+    const ctx = document.getElementById('chart').getContext('2d');
+    const chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: """ + json.dumps(timestamps) + """,
+            datasets: [
+                {
+                    label: 'Voltage (V)',
+                    data: """ + json.dumps(voltages) + """,
+                    borderColor: 'blue',
+                    fill: false
+                },
+                {
+                    label: 'Current (A)',
+                    data: """ + json.dumps(currents) + """,
+                    borderColor: 'green',
+                    fill: false
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            plugins: { legend: { position: 'top' }},
+            scales: { y: { beginAtZero: true }}
+        }
+    });
+    </script>
+    """
 
-html += f"""
-<script>
-const ctx = document.getElementById('chart').getContext('2d');
-const chart = new Chart(ctx, {{
-    type: 'line',
-    data: {{
-        labels: {json.dumps(timestamps)},
-        datasets: [
-            {{
-                label: 'Voltage (V)',
-                data: {json.dumps(voltages)},
-                borderWidth: 2,
-                borderColor: 'blue',
-                fill: false
-            }},
-            {{
-                label: 'Current (A)',
-                data: {json.dumps(currents)},
-                borderWidth: 2,
-                borderColor: 'green',
-                fill: false
-            }}
-        ]
-    }},
-    options: {{
-        responsive: true,
-        plugins: {{
-            legend: {{ position: 'top' }}
-        }},
-        scales: {{
-            y: {{
-                beginAtZero: true
-            }}
-        }}
-    }}
-}});
-</script>
-</body></html>
-"""
+    # Table of values
+    html += """
+    <h2>Last 10 Readings</h2>
+    <table>
+    <tr><th>Timestamp</th><th>Voltage (V)</th><th>Current (A)</th></tr>
+    """
+    for ts, v, i in parsed:
+        html += f"<tr><td>{ts}</td><td>{v:.2f}</td><td>{i:.2f}</td></tr>"
+    html += "</table></body></html>"
+
     return html
 
 if __name__ == "__main__":
