@@ -128,39 +128,53 @@ def index():
     """
 
     if len(timestamps) >= 2:
-        html += """
-        <script>
-            const ctx = document.getElementById('chart').getContext('2d');
-            new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: """ + json.dumps(timestamps) + ",""" + """,
-                    datasets: [
-                        {
-                            label: 'Battery Voltage (V)',
-                            data: """ + json.dumps(voltages) + ",""" + """,
-                            borderColor: 'blue', fill: false
-                        },
-                        {
-                            label: 'Battery Current (A)',
-                            data: """ + json.dumps(currents) + ",""" + """,
-                            borderColor: 'green', fill: false
-                        },
-                        {
-                            label: 'Solar Power (W)',
-                            data: """ + json.dumps(powers) + ",""" + """,
-                            borderColor: 'orange', fill: false
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: { legend: { position: 'top' } },
-                    scales: { y: { beginAtZero: true } }
-                }
-            });
-        </script>
+    html += f"""
+    <script>
+    document.addEventListener("DOMContentLoaded", function () {{
+        const ctx = document.getElementById('chart').getContext('2d');
+        const chart = new Chart(ctx, {{
+            type: 'line',
+            data: {{
+                labels: {json.dumps(timestamps)},
+                datasets: [
+                    {{
+                        label: 'Battery Voltage (V)',
+                        data: {json.dumps(voltages)},
+                        borderColor: 'blue',
+                        fill: false,
+                        tension: 0.1
+                    }},
+                    {{
+                        label: 'Battery Current (A)',
+                        data: {json.dumps(currents)},
+                        borderColor: 'green',
+                        fill: false,
+                        tension: 0.1
+                    }},
+                    {{
+                        label: 'Solar Power (W)',
+                        data: {json.dumps(powers)},
+                        borderColor: 'orange',
+                        fill: false,
+                        tension: 0.1
+                    }}
+                ]
+            }},
+            options: {{
+                responsive: true,
+                plugins: {{
+                    legend: {{ position: 'top' }}
+                }},
+                scales: {{
+                    x: {{ display: true, title: {{ display: true, text: 'Timestamp' }} }},
+                    y: {{ beginAtZero: true, title: {{ display: true, text: 'Value' }} }}
+                }}
+            }}
+        }});
+    }});
+    </script>
+    """
+
         """
     else:
         html += "<p><strong>Waiting for more data to display the graph...</strong></p>"
