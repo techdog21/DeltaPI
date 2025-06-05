@@ -15,7 +15,6 @@ CS_MAP = {
     "5": "Float"
 }
 
-# Ensure database and table
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
@@ -80,12 +79,17 @@ def index():
         except:
             continue
 
+    timestamps = [x[0] for x in parsed]
+    voltages = [x[1] for x in parsed]
+    currents = [x[2] for x in parsed]
+    powers = [x[3] for x in parsed]
+
     html = """
     <html>
     <head>
         <title>VE.Direct Dashboard - 24 Hours</title>
-        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
-        <script src=\"https://cdn.jsdelivr.net/npm/chart.js\"></script>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <style>
             body { font-family: sans-serif; margin: 1em; }
             #chart-container { width: 100%; max-width: 900px; margin: auto; height: 400px; }
@@ -98,10 +102,10 @@ def index():
     </head>
     <body>
         <h2>VE.Direct Solar Data (Last 24 Hours)</h2>
-        <div id=\"chart-container\">
-            <canvas id=\"chart\"></canvas>
+        <div id="chart-container">
+            <canvas id="chart"></canvas>
         </div>
-        <div class=\"table-container\">
+        <div class="table-container">
             <table>
                 <tr>
                     <th>Time</th><th>Battery Voltage (V)</th><th>Battery Current (A)</th><th>Solar Power (W)</th><th>Panel Voltage (V)</th>
@@ -109,78 +113,76 @@ def index():
                 </tr>
     """
 
-    timestamps = []
-    voltages = []
-    currents = []
-    powers = []
-
     for row in parsed:
         ts, v, i, ppv, vpv, load, cs, err, h20 = row
         html += f"<tr><td>{ts}</td><td>{v:.2f}</td><td>{i:.2f}</td><td>{ppv}</td><td>{vpv:.2f}</td><td>{load}</td><td>{cs}</td><td>{err}</td><td>{h20:.2f}</td></tr>"
-        timestamps.append(ts)
-        voltages.append(v)
-        currents.append(i)
-        powers.append(ppv)
 
     html += """
             </table>
         </div>
+        <script>
+            const ctx = document.getElementById('chart').getContext('2d');
+            const chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: """ + json.dumps(timestamps) + """,
+                    datasets: [
+                        {
+                            label: 'Battery Voltage (V)',
+                            data: """ + json.dumps(voltages) + """,
+                            borderColor: 'blue',
+                            fill: false,
+                            tension: 0.1
+                        },
+                        {
+                            label: 'Battery Current (A)',
+                            data: """ + json.dumps(currents) + """,
+                            borderColor: 'green',
+                            fill: false,
+                            tension: 0.1
+                        },
+                        {
+                            label: 'Solar Power (W)',
+                            data: """ + json.dumps(powers) + """,
+                            borderColor: 'orange',
+                            fill: false,
+                            tension: 0.1
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { position: 'top' }
+                    },
+                    scales: {
+                        x: { display: true, title: { display: true, text: 'Timestamp' } },
+                        y: { beginAtZero: true, title: { display: true, text: 'Value' } }
+                    }
+                }
+            });
+        </script>
+    </body>
+    </html>
     """
-
-    if len(timestamps) >= 2:
-    html += f"""
-    <script>
-    document.addEventListener("DOMContentLoaded", function () {{
-        const ctx = document.getElementById('chart').getContext('2d');
-        const chart = new Chart(ctx, {{
-            type: 'line',
-            data: {{
-                labels: {json.dumps(timestamps)},
-                datasets: [
-                    {{
-                        label: 'Battery Voltage (V)',
-                        data: {json.dumps(voltages)},
-                        borderColor: 'blue',
-                        fill: false,
-                        tension: 0.1
-                    }},
-                    {{
-                        label: 'Battery Current (A)',
-                        data: {json.dumps(currents)},
-                        borderColor: 'green',
-                        fill: false,
-                        tension: 0.1
-                    }},
-                    {{
-                        label: 'Solar Power (W)',
-                        data: {json.dumps(powers)},
-                        borderColor: 'orange',
-                        fill: false,
-                        tension: 0.1
-                    }}
-                ]
-            }},
-            options: {{
-                responsive: true,
-                plugins: {{
-                    legend: {{ position: 'top' }}
-                }},
-                scales: {{
-                    x: {{ display: true, title: {{ display: true, text: 'Timestamp' }} }},
-                    y: {{ beginAtZero: true, title: {{ display: true, text: 'Value' }} }}
-                }}
-            }}
-        }});
-    }});
-    </script>
-    """
-
-        """
-    else:
-        html += "<p><strong>Waiting for more data to display the graph...</strong></p>"
-
-    html += "</body></html>"
     return html
+
+@app.route("/latest")
+def latest():
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT timestamp, received, data FROM logs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if row:
+            return jsonify({
+                "timestamp": row[0],
+                "received": row[1],
+                "data": json.loads(row[2])
+            })
+        return jsonify({"error": "No data"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/debug")
 def debug():
@@ -207,23 +209,6 @@ def debug():
 
     html += "</pre>"
     return html
-
-@app.route("/latest")
-def latest():
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT timestamp, received, data FROM logs ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-        if row:
-            return jsonify({
-                "timestamp": row[0],
-                "received": row[1],
-                "data": json.loads(row[2])
-            })
-        return jsonify({"error": "No data"}), 404
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run()
