@@ -1,13 +1,21 @@
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 import sqlite3
-import os
 import json
 
 app = Flask(__name__)
 DB_PATH = "vedirect.db"
 
-# Create table if it doesn't exist
+CS_MAP = {
+    "0": "Off",
+    "1": "Low Power",
+    "2": "Fault",
+    "3": "Bulk",
+    "4": "Absorption",
+    "5": "Float"
+}
+
+# Ensure database and table
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
@@ -21,7 +29,6 @@ def init_db():
 
 init_db()
 
-# POST endpoint for VE.Direct logger
 @app.route("/log", methods=["POST"])
 def log():
     entry = request.get_json()
@@ -42,31 +49,11 @@ def log():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Latest single reading
-@app.route("/latest", methods=["GET"])
-def latest():
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT timestamp, received, data FROM logs ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-        if row:
-            return jsonify({
-                "timestamp": row[0],
-                "received": row[1],
-                "data": json.loads(row[2])
-            })
-        return jsonify({"error": "No data"}), 404
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# Homepage with 24h graph and table
 @app.route("/")
 def index():
     try:
         now = datetime.utcnow()
         since = now - timedelta(hours=24)
-
         with sqlite3.connect(DB_PATH) as conn:
             rows = conn.execute(
                 "SELECT timestamp, received, data FROM logs ORDER BY id ASC"
@@ -83,114 +70,98 @@ def index():
             if ts_dt >= since:
                 v = int(data.get("V", 0)) / 1000
                 i = int(data.get("I", 0)) / 1000
-                parsed.append((ts, v, i))
+                ppv = int(data.get("PPV", 0))
+                vpv = int(data.get("VPV", 0)) / 1000
+                load = data.get("LOAD", "N/A")
+                cs = CS_MAP.get(data.get("CS", "0"), f"Unknown ({data.get('CS')})")
+                err = data.get("ERR", "0")
+                h20 = int(data.get("H20", 0)) / 100
+                parsed.append((ts, v, i, ppv, vpv, load, cs, err, h20))
         except:
             continue
-
-    timestamps = [x[0] for x in parsed]
-    voltages = [x[1] for x in parsed]
-    currents = [x[2] for x in parsed]
 
     html = """
     <html>
     <head>
         <title>VE.Direct Dashboard - 24 Hours</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+        <script src=\"https://cdn.jsdelivr.net/npm/chart.js\"></script>
         <style>
-            body {
-                font-family: sans-serif;
-                margin: 1em;
-            }
-            #chart-container {
-                width: 100%;
-                max-width: 900px;
-                margin: auto;
-            }
-            canvas {
-                width: 100% !important;
-                height: 400px !important;
-            }
-            .table-container {
-                overflow-x: auto;
-                margin-top: 2em;
-            }
-            table {
-                width: 100%;
-                border-collapse: collapse;
-                font-size: 0.95em;
-            }
-            th, td {
-                border: 1px solid #ccc;
-                padding: 8px;
-                text-align: left;
-            }
-            th {
-                background-color: #eee;
-            }
+            body { font-family: sans-serif; margin: 1em; }
+            #chart-container { width: 100%; max-width: 900px; margin: auto; }
+            canvas { width: 100% !important; height: 400px !important; }
+            .table-container { overflow-x: auto; margin-top: 2em; }
+            table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+            th, td { border: 1px solid #ccc; padding: 6px; text-align: left; }
+            th { background-color: #eee; }
         </style>
     </head>
     <body>
         <h2>VE.Direct Solar Data (Last 24 Hours)</h2>
-
-        <div id="chart-container">
-            <canvas id="chart"></canvas>
+        <div id=\"chart-container\">
+            <canvas id=\"chart\"></canvas>
         </div>
-
-        <div class="table-container">
+        <div class=\"table-container\">
             <table>
-                <tr><th>Timestamp</th><th>Voltage (V)</th><th>Current (A)</th></tr>
+                <tr>
+                    <th>Timestamp</th><th>V (Bat)</th><th>I (Bat)</th><th>PPV (W)</th><th>VPV (V)</th>
+                    <th>LOAD</th><th>Mode</th><th>Error</th><th>H20 (kWh)</th>
+                </tr>
     """
 
-    for ts, v, i in parsed:
-        html += f"<tr><td>{ts}</td><td>{v:.2f}</td><td>{i:.2f}</td></tr>"
+    timestamps = []
+    voltages = []
+    currents = []
+    powers = []
+
+    for row in parsed:
+        ts, v, i, ppv, vpv, load, cs, err, h20 = row
+        html += f"<tr><td>{ts}</td><td>{v:.2f}</td><td>{i:.2f}</td><td>{ppv}</td><td>{vpv:.2f}</td><td>{load}</td><td>{cs}</td><td>{err}</td><td>{h20:.2f}</td></tr>"
+        timestamps.append(ts)
+        voltages.append(v)
+        currents.append(i)
+        powers.append(ppv)
 
     html += """
             </table>
         </div>
-
         <script>
             const ctx = document.getElementById('chart').getContext('2d');
-            const chart = new Chart(ctx, {
+            new Chart(ctx, {
                 type: 'line',
                 data: {
-                    labels: """ + json.dumps(timestamps) + """,
+                    labels: """ + json.dumps(timestamps) + ",""" + """,
                     datasets: [
                         {
                             label: 'Voltage (V)',
-                            data: """ + json.dumps(voltages) + """,
-                            borderColor: 'blue',
-                            borderWidth: 2,
-                            fill: false
+                            data: """ + json.dumps(voltages) + ",""" + """,
+                            borderColor: 'blue', fill: false
                         },
                         {
                             label: 'Current (A)',
-                            data: """ + json.dumps(currents) + """,
-                            borderColor: 'green',
-                            borderWidth: 2,
-                            fill: false
+                            data: """ + json.dumps(currents) + ",""" + """,
+                            borderColor: 'green', fill: false
+                        },
+                        {
+                            label: 'Solar Power (W)',
+                            data: """ + json.dumps(powers) + ",""" + """,
+                            borderColor: 'orange', fill: false
                         }
                     ]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: {
-                        legend: { position: 'top' }
-                    },
-                    scales: {
-                        y: { beginAtZero: true }
-                    }
+                    plugins: { legend: { position: 'top' } },
+                    scales: { y: { beginAtZero: true } }
                 }
             });
         </script>
-    </body>
-    </html>
+    </body></html>
     """
 
     return html
 
-# Debug route to inspect last 5 entries
 @app.route("/debug")
 def debug():
     try:
@@ -216,6 +187,23 @@ def debug():
 
     html += "</pre>"
     return html
+
+@app.route("/latest")
+def latest():
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT timestamp, received, data FROM logs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if row:
+            return jsonify({
+                "timestamp": row[0],
+                "received": row[1],
+                "data": json.loads(row[2])
+            })
+        return jsonify({"error": "No data"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run()
