@@ -79,63 +79,68 @@ def index():
         except Exception as e:
             continue
 
-    # Build HTML
-    html = """
-    <html><head><title>VE.Direct Logs</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    </head><body>
-    <h1>Latest Solar Readings</h1>
-    <table border="1" cellpadding="5">
-    <tr><th>Timestamp</th><th>Voltage (V)</th><th>Current (A)</th></tr>
-    """
-    for ts, v, i in parsed:
-        html += f"<tr><td>{ts}</td><td>{v:.2f}</td><td>{i:.2f}</td></tr>"
-    html += "</table><br><canvas id='chart' width='600' height='300'></canvas>"
+# Build HTML
+html = """
+<html><head><title>VE.Direct Logs</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head><body>
+<h1>Latest Solar Readings</h1>
 
-    # JavaScript for Chart.js
-    timestamps = [x[0] for x in parsed]
-    voltages = [x[1] for x in parsed]
-    currents = [x[2] for x in parsed]
+<!-- Chart first -->
+<canvas id='chart' width='600' height='300'></canvas><br><br>
 
-    html += f"""
-    <script>
-    const ctx = document.getElementById('chart').getContext('2d');
-    const chart = new Chart(ctx, {{
-        type: 'line',
-        data: {{
-            labels: {json.dumps(timestamps)},
-            datasets: [
-                {{
-                    label: 'Voltage (V)',
-                    data: {json.dumps(voltages)},
-                    borderWidth: 2,
-                    borderColor: 'blue',
-                    fill: false
-                }},
-                {{
-                    label: 'Current (A)',
-                    data: {json.dumps(currents)},
-                    borderWidth: 2,
-                    borderColor: 'green',
-                    fill: false
-                }}
-            ]
-        }},
-        options: {{
-            responsive: true,
-            plugins: {{
-                legend: {{ position: 'top' }}
+<!-- Table second -->
+<table border="1" cellpadding="5">
+<tr><th>Timestamp</th><th>Voltage (V)</th><th>Current (A)</th></tr>
+"""
+for ts, v, i in parsed:
+    html += f"<tr><td>{ts}</td><td>{v:.2f}</td><td>{i:.2f}</td></tr>"
+html += "</table>"
+
+# JavaScript for Chart.js
+timestamps = [x[0] for x in parsed]
+voltages = [x[1] for x in parsed]
+currents = [x[2] for x in parsed]
+
+html += f"""
+<script>
+const ctx = document.getElementById('chart').getContext('2d');
+const chart = new Chart(ctx, {{
+    type: 'line',
+    data: {{
+        labels: {json.dumps(timestamps)},
+        datasets: [
+            {{
+                label: 'Voltage (V)',
+                data: {json.dumps(voltages)},
+                borderWidth: 2,
+                borderColor: 'blue',
+                fill: false
             }},
-            scales: {{
-                y: {{
-                    beginAtZero: true
-                }}
+            {{
+                label: 'Current (A)',
+                data: {json.dumps(currents)},
+                borderWidth: 2,
+                borderColor: 'green',
+                fill: false
+            }}
+        ]
+    }},
+    options: {{
+        responsive: true,
+        plugins: {{
+            legend: {{ position: 'top' }}
+        }},
+        scales: {{
+            y: {{
+                beginAtZero: true
             }}
         }}
-    }});
-    </script>
-    </body></html>
-    """
+    }}
+}});
+</script>
+</body></html>
+"""
     return html
 
 if __name__ == "__main__":
