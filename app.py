@@ -4,13 +4,10 @@ import sqlite3
 import os
 import json
 
-now = datetime.datetime.utcnow()
-since = now - datetime.timedelta(hours=24)
-
 app = Flask(__name__)
 DB_PATH = "vedirect.db"
 
-# Create database and table if they don't exist
+# Create table if it doesn't exist
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
@@ -24,6 +21,7 @@ def init_db():
 
 init_db()
 
+# POST endpoint for VE.Direct logger
 @app.route("/log", methods=["POST"])
 def log():
     entry = request.get_json()
@@ -44,6 +42,7 @@ def log():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# Latest single reading
 @app.route("/latest", methods=["GET"])
 def latest():
     try:
@@ -55,21 +54,22 @@ def latest():
             return jsonify({
                 "timestamp": row[0],
                 "received": row[1],
-                "data": json.loads(row[2])  # ← convert from string to object
+                "data": json.loads(row[2])
             })
         return jsonify({"error": "No data"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# Homepage with 24h graph and table
 @app.route("/")
 def index():
     try:
-        now = datetime.datetime.utcnow()
-        since = now - datetime.timedelta(hours=24)
+        now = datetime.utcnow()
+        since = now - timedelta(hours=24)
 
         with sqlite3.connect(DB_PATH) as conn:
             rows = conn.execute(
-                "SELECT timestamp, received, data FROM logs WHERE timestamp >= ? ORDER BY timestamp ASC",
-                (since.isoformat(),)
+                "SELECT timestamp, received, data FROM logs ORDER BY id ASC"
             ).fetchall()
     except Exception as e:
         return f"<p>Error reading database: {e}</p>"
@@ -78,10 +78,12 @@ def index():
     for row in rows:
         try:
             data = json.loads(row[2])
-            v = int(data.get("V", 0)) / 1000
-            i = int(data.get("I", 0)) / 1000
             ts = data.get("timestamp", row[0])
-            parsed.append((ts, v, i))
+            ts_dt = datetime.fromisoformat(ts)
+            if ts_dt >= since:
+                v = int(data.get("V", 0)) / 1000
+                i = int(data.get("I", 0)) / 1000
+                parsed.append((ts, v, i))
         except:
             continue
 
@@ -187,6 +189,8 @@ def index():
     """
 
     return html
+
+# Debug route to inspect last 5 entries
 @app.route("/debug")
 def debug():
     try:
@@ -205,15 +209,13 @@ def debug():
             json_ts = data.get("timestamp", "N/A")
             v = int(data.get("V", 0)) / 1000
             i = int(data.get("I", 0)) / 1000
-        except Exception as e:
+        except:
             json_ts = "Parse error"
             v = i = "?"
         html += f"ID: {row[0]}\nDB timestamp: {db_ts}\nJSON timestamp: {json_ts}\nV: {v} V, I: {i} A\n---\n"
 
     html += "</pre>"
     return html
-
-
 
 if __name__ == "__main__":
     app.run()
