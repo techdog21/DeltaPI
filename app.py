@@ -188,6 +188,32 @@ def index():
     """
 
     return html
+@app.route("/debug")
+def debug():
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(
+                "SELECT id, timestamp, received, data FROM logs ORDER BY id DESC LIMIT 5"
+            ).fetchall()
+    except Exception as e:
+        return f"<p>Error reading database: {e}</p>"
+
+    html = "<h2>Debug: Last 5 Entries</h2><pre>\n"
+    for row in rows:
+        db_ts = row[1]
+        try:
+            data = json.loads(row[3])
+            json_ts = data.get("timestamp", "N/A")
+            v = int(data.get("V", 0)) / 1000
+            i = int(data.get("I", 0)) / 1000
+        except Exception as e:
+            json_ts = "Parse error"
+            v = i = "?"
+        html += f"ID: {row[0]}\nDB timestamp: {db_ts}\nJSON timestamp: {json_ts}\nV: {v} V, I: {i} A\n---\n"
+
+    html += "</pre>"
+    return html
+
 
 
 if __name__ == "__main__":
