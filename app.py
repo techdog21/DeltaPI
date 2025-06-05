@@ -68,7 +68,7 @@ def index():
         return f"<p>Error reading database: {e}</p>"
 
     parsed = []
-    for row in reversed(rows):  # Oldest first
+    for row in reversed(rows):
         try:
             data = json.loads(row[2])
             v = int(data.get("V", 0)) / 1000
@@ -89,8 +89,19 @@ def index():
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <style>
-            body { font-family: sans-serif; margin: 1em; }
-            canvas { width: 100% !important; height: auto !important; }
+            body {
+                font-family: sans-serif;
+                margin: 1em;
+            }
+            #chart-container {
+                width: 100%;
+                max-width: 900px;
+                margin: auto;
+            }
+            canvas {
+                width: 100% !important;
+                height: 400px !important;
+            }
             .table-container {
                 overflow-x: auto;
                 margin-top: 2em;
@@ -112,7 +123,11 @@ def index():
     </head>
     <body>
         <h2>VE.Direct Solar Data</h2>
-        <canvas id="chart"></canvas>
+
+        <div id="chart-container">
+            <canvas id="chart"></canvas>
+        </div>
+
         <div class="table-container">
             <table>
                 <tr><th>Timestamp</th><th>Voltage (V)</th><th>Current (A)</th></tr>
@@ -151,11 +166,11 @@ def index():
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    scales: {
-                        y: { beginAtZero: true }
-                    },
                     plugins: {
                         legend: { position: 'top' }
+                    },
+                    scales: {
+                        y: { beginAtZero: true }
                     }
                 }
             });
@@ -165,7 +180,6 @@ def index():
     """
 
     return html
-
 
 if __name__ == "__main__":
     app.run()
