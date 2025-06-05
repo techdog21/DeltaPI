@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from datetime import datetime
 import sqlite3
 import os
+import json
 
 app = Flask(__name__)
 DB_PATH = "vedirect.db"
@@ -28,7 +29,7 @@ def log():
 
     timestamp = entry.get("timestamp", datetime.utcnow().isoformat())
     received = datetime.utcnow().isoformat()
-    data_str = str(entry)
+    data_str = json.dumps(entry)
 
     try:
         with sqlite3.connect(DB_PATH) as conn:
