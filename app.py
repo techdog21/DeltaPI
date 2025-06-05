@@ -4,6 +4,9 @@ import sqlite3
 import os
 import json
 
+now = datetime.datetime.utcnow()
+since = now - datetime.timedelta(hours=24)
+
 app = Flask(__name__)
 DB_PATH = "vedirect.db"
 
@@ -62,7 +65,8 @@ def index():
     try:
         with sqlite3.connect(DB_PATH) as conn:
             rows = conn.execute(
-                "SELECT timestamp, received, data FROM logs ORDER BY id DESC LIMIT 10"
+                "SELECT timestamp, received, data FROM logs WHERE timestamp >= ? ORDER BY timestamp ASC",
+                (since.isoformat(),)
             ).fetchall()
     except Exception as e:
         return f"<p>Error reading database: {e}</p>"
