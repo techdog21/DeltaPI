@@ -88,8 +88,8 @@ def index():
         <script src=\"https://cdn.jsdelivr.net/npm/chart.js\"></script>
         <style>
             body { font-family: sans-serif; margin: 1em; }
-            #chart-container { width: 100%; max-width: 900px; margin: auto; }
-            canvas { width: 100% !important; height: 400px !important; }
+            #chart-container { width: 100%; max-width: 900px; margin: auto; height: 400px; }
+            canvas { width: 100% !important; height: 100% !important; }
             .table-container { overflow-x: auto; margin-top: 2em; }
             table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
             th, td { border: 1px solid #ccc; padding: 6px; text-align: left; }
@@ -104,8 +104,8 @@ def index():
         <div class=\"table-container\">
             <table>
                 <tr>
-                    <th>Timestamp</th><th>V (Bat)</th><th>I (Bat)</th><th>PPV (W)</th><th>VPV (V)</th>
-                    <th>LOAD</th><th>Mode</th><th>Error</th><th>H20 (kWh)</th>
+                    <th>Time</th><th>Battery Voltage (V)</th><th>Battery Current (A)</th><th>Solar Power (W)</th><th>Panel Voltage (V)</th>
+                    <th>Load Output</th><th>Charge Mode</th><th>Error Code</th><th>Energy Today (kWh)</th>
                 </tr>
     """
 
@@ -125,6 +125,10 @@ def index():
     html += """
             </table>
         </div>
+    """
+
+    if len(timestamps) >= 2:
+        html += """
         <script>
             const ctx = document.getElementById('chart').getContext('2d');
             new Chart(ctx, {
@@ -133,12 +137,12 @@ def index():
                     labels: """ + json.dumps(timestamps) + ",""" + """,
                     datasets: [
                         {
-                            label: 'Voltage (V)',
+                            label: 'Battery Voltage (V)',
                             data: """ + json.dumps(voltages) + ",""" + """,
                             borderColor: 'blue', fill: false
                         },
                         {
-                            label: 'Current (A)',
+                            label: 'Battery Current (A)',
                             data: """ + json.dumps(currents) + ",""" + """,
                             borderColor: 'green', fill: false
                         },
@@ -157,9 +161,11 @@ def index():
                 }
             });
         </script>
-    </body></html>
-    """
+        """
+    else:
+        html += "<p><strong>Waiting for more data to display the graph...</strong></p>"
 
+    html += "</body></html>"
     return html
 
 @app.route("/debug")
