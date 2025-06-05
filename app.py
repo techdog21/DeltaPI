@@ -67,80 +67,105 @@ def index():
     except Exception as e:
         return f"<p>Error reading database: {e}</p>"
 
-    # Parse and reverse rows (oldest first)
     parsed = []
-    for row in reversed(rows):
+    for row in reversed(rows):  # Oldest first
         try:
             data = json.loads(row[2])
-            v = int(data.get("V", 0)) / 1000  # mV → V
-            i = int(data.get("I", 0)) / 1000  # mA → A
+            v = int(data.get("V", 0)) / 1000
+            i = int(data.get("I", 0)) / 1000
             ts = data.get("timestamp", row[0])
             parsed.append((ts, v, i))
         except:
             continue
 
-    # Prepare chart data
     timestamps = [x[0] for x in parsed]
     voltages = [x[1] for x in parsed]
     currents = [x[2] for x in parsed]
 
-    # Begin HTML
     html = """
-    <html><head><title>VE.Direct Dashboard</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        body { font-family: sans-serif; margin: 2em; }
-        table { border-collapse: collapse; margin-top: 2em; }
-        th, td { border: 1px solid #ccc; padding: 6px 12px; }
-        th { background-color: #eee; }
-    </style>
-    </head><body>
-    <h1>VE.Direct Solar Data</h1>
-
-    <!-- Chart at top -->
-    <canvas id="chart" width="800" height="300"></canvas>
-
-    <script>
-    const ctx = document.getElementById('chart').getContext('2d');
-    const chart = new Chart(ctx, {
-        type: 'line',
-        data: {
-            labels: """ + json.dumps(timestamps) + """,
-            datasets: [
-                {
-                    label: 'Voltage (V)',
-                    data: """ + json.dumps(voltages) + """,
-                    borderColor: 'blue',
-                    fill: false
-                },
-                {
-                    label: 'Current (A)',
-                    data: """ + json.dumps(currents) + """,
-                    borderColor: 'green',
-                    fill: false
-                }
-            ]
-        },
-        options: {
-            responsive: true,
-            plugins: { legend: { position: 'top' }},
-            scales: { y: { beginAtZero: true }}
-        }
-    });
-    </script>
+    <html>
+    <head>
+        <title>VE.Direct Dashboard</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <style>
+            body { font-family: sans-serif; margin: 1em; }
+            canvas { width: 100% !important; height: auto !important; }
+            .table-container {
+                overflow-x: auto;
+                margin-top: 2em;
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 0.95em;
+            }
+            th, td {
+                border: 1px solid #ccc;
+                padding: 8px;
+                text-align: left;
+            }
+            th {
+                background-color: #eee;
+            }
+        </style>
+    </head>
+    <body>
+        <h2>VE.Direct Solar Data</h2>
+        <canvas id="chart"></canvas>
+        <div class="table-container">
+            <table>
+                <tr><th>Timestamp</th><th>Voltage (V)</th><th>Current (A)</th></tr>
     """
 
-    # Table of values
-    html += """
-    <h2>Last 10 Readings</h2>
-    <table>
-    <tr><th>Timestamp</th><th>Voltage (V)</th><th>Current (A)</th></tr>
-    """
     for ts, v, i in parsed:
         html += f"<tr><td>{ts}</td><td>{v:.2f}</td><td>{i:.2f}</td></tr>"
-    html += "</table></body></html>"
+
+    html += """
+            </table>
+        </div>
+
+        <script>
+            const ctx = document.getElementById('chart').getContext('2d');
+            const chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: """ + json.dumps(timestamps) + """,
+                    datasets: [
+                        {
+                            label: 'Voltage (V)',
+                            data: """ + json.dumps(voltages) + """,
+                            borderColor: 'blue',
+                            borderWidth: 2,
+                            fill: false
+                        },
+                        {
+                            label: 'Current (A)',
+                            data: """ + json.dumps(currents) + """,
+                            borderColor: 'green',
+                            borderWidth: 2,
+                            fill: false
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true }
+                    },
+                    plugins: {
+                        legend: { position: 'top' }
+                    }
+                }
+            });
+        </script>
+    </body>
+    </html>
+    """
 
     return html
+
 
 if __name__ == "__main__":
     app.run()
