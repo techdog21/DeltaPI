@@ -78,7 +78,7 @@ def index():
                 ppv = int(data.get("PPV", 0))
                 vpv = int(data.get("VPV", 0)) / 1000
                 load = data.get("LOAD", "N/A")
-                cs = CS_MAP.get(data.get("CS", "0"), f"Unknown ({data.get('CS')})")
+                cs = CS_MAP.get(str(data.get("CS", "0")), f"Unknown ({data.get('CS')})")
                 err = data.get("ERR", "0")
                 h20 = int(data.get("H20", 0)) / 100
                 parsed.append((ts, v, i, ppv, vpv, load, cs, err, h20))
