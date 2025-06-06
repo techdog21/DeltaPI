@@ -27,12 +27,13 @@ def log_error(message):
         errlog.write(f"[{datetime.utcnow().isoformat()}] {message}\n")
 
 def main():
-    try:
-        ser = serial.Serial('/dev/ttyUSB0', 19200, timeout=5)
-    except Exception as e:
-        log_error(f"Serial open failed: {e}")
-        return
-
+    ser = None
+    while ser is None:
+        try:
+            ser = serial.Serial('/dev/ttyUSB0', 19200, timeout=5)
+        except Exception as e:
+            log_error(f"Serial open failed: {e}")
+            time.sleep(30)  # wait before retrying
     while True:
         try:
             frame = read_frame(ser)
