@@ -63,23 +63,25 @@ def index():
             rows = conn.execute(
                 "SELECT timestamp, received, data FROM logs ORDER BY id ASC"
             ).fetchall()
-        if rows:
-            last_ts = datetime.fromisoformat(json.loads(rows[-1][2]).get("timestamp", rows[-1][0]))
-            delta = datetime.utcnow() - last_ts
-            if delta.total_seconds() < 120:
-                status_color = "green"
-                status_text = "Receiving data"
-            else:
-                status_color = "red"
-                status_text = f"No data in {int(delta.total_seconds() // 60)} minutes"
-        else:
-            status_color = "red"
-            status_text = "No data"
-
     except Exception as e:
         return f"<p>Error reading database: {e}</p>"
 
     parsed = []
+    # Status light logic
+    if rows:
+        last_ts = datetime.fromisoformat(json.loads(rows[-1][2]).get("timestamp", rows[-1][0]))
+        delta = datetime.utcnow() - last_ts
+        if delta.total_seconds() < 120:
+            status_color = "green"
+            status_text = "Receiving data"
+        else:
+            status_color = "red"
+            mins = int(delta.total_seconds() // 60)
+            status_text = f"No data in {mins} min"
+    else:
+        status_color = "red"
+        status_text = "No data"
+
     for row in rows:
         try:
             data = json.loads(row[2])
@@ -119,24 +121,20 @@ def index():
             th { background-color: #eee; }
         </style>
     </head>
-    <body>
-        <h2>VE.Direct Solar Data (Last 24 Hours)</h2>
-        <div id="chart-container">
-            <canvas id="chart"></canvas>
-        </div>
-        <div style="margin-bottom: 1em;">
-            <strong>Status:</strong>
-            <span style="display: inline-block; width: 12px; height: 12px; border-radius: 50%; background-color: {{ status_color }};"></span>
-                {{ status_text }}
-        </div>
-        <div class="table-container">
-            <table>
-                <tr>
-                    <th>Time</th><th>Battery Voltage (V)</th><th>Battery Current (A)</th><th>Solar Power (W)</th><th>Panel Voltage (V)</th>
-                    <th>Load Output</th><th>Charge Mode</th><th>Error Code</th><th>Energy Today (kWh)</th>
-                </tr>
-    """
-
+     <body>
+            <h2>VE.Direct Solar Data (Last 24 Hours)</h2>
+            <div style="margin-bottom: 1em;">
+                <strong>Status:</strong>
+                <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background-color:""" + status_color + """;"></span>
+                """ + status_text + """
+            </div>
+            <div class="table-container">
+                <table>
+                    <tr>
+                        <th>Time</th><th>Battery Voltage (V)</th><th>Battery Current (A)</th><th>Solar Power (W)</th><th>Panel Voltage (V)</th>
+                        <th>Load Output</th><th>Charge Mode</th><th>Error Code</th><th>Energy Today (kWh)</th>
+                    </tr>
+        """
     for row in parsed:
         ts, v, i, ppv, vpv, load, cs, err, h20 = row
         html += f"<tr><td>{ts}</td><td>{v:.2f}</td><td>{i:.2f}</td><td>{ppv}</td><td>{vpv:.2f}</td><td>{load}</td><td>{cs}</td><td>{err}</td><td>{h20:.2f}</td></tr>"
