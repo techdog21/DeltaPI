@@ -146,6 +146,10 @@ def index():
 
     if len(timestamps) >= 2:
         html += f"""
+        <div id="chart-container">
+            <canvas id="chart"></canvas>
+        </div>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <script>
         const ctx = document.getElementById('chart').getContext('2d');
         const chart = new Chart(ctx, {{
