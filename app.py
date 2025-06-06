@@ -196,5 +196,22 @@ def latest():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/debug")
+def debug():
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(
+                "SELECT timestamp, received, data FROM logs ORDER BY id DESC LIMIT 5"
+            ).fetchall()
+    except Exception as e:
+        return f"<p>Error reading database: {e}</p>"
+
+    html = "<h2>Debug: Last 5 Log Entries</h2><ul>"
+    for row in rows:
+        html += f"<li><strong>{row[0]}</strong> | Received: {row[1]}<br><pre>{row[2]}</pre></li><hr>"
+    html += "</ul>"
+    return html
+
+
 if __name__ == "__main__":
     app.run()
