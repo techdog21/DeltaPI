@@ -63,6 +63,19 @@ def index():
             rows = conn.execute(
                 "SELECT timestamp, received, data FROM logs ORDER BY id ASC"
             ).fetchall()
+        if rows:
+            last_ts = datetime.fromisoformat(json.loads(rows[-1][2]).get("timestamp", rows[-1][0]))
+            delta = datetime.utcnow() - last_ts
+            if delta.total_seconds() < 120:
+                status_color = "green"
+                status_text = "Receiving data"
+            else:
+                status_color = "red"
+                status_text = f"No data in {int(delta.total_seconds() // 60)} minutes"
+        else:
+            status_color = "red"
+            status_text = "No data"
+
     except Exception as e:
         return f"<p>Error reading database: {e}</p>"
 
@@ -110,6 +123,11 @@ def index():
         <h2>VE.Direct Solar Data (Last 24 Hours)</h2>
         <div id="chart-container">
             <canvas id="chart"></canvas>
+        </div>
+        <div style="margin-bottom: 1em;">
+            <strong>Status:</strong>
+            <span style="display: inline-block; width: 12px; height: 12px; border-radius: 50%; background-color: {{ status_color }};"></span>
+                {{ status_text }}
         </div>
         <div class="table-container">
             <table>
