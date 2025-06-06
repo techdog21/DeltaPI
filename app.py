@@ -139,7 +139,7 @@ def index():
                         <th>Load Output</th><th>Charge Mode</th><th>Error Code</th><th>Energy Today (kWh)</th>
                     </tr>
         """
-    for row in parsed:
+    for row in reversed(parsed):
         ts, v, i, ppv, vpv, load, cs, err, h20 = row
         html += f"<tr><td>{ts}</td><td>{v:.2f}</td><td>{i:.2f}</td><td>{ppv}</td><td>{vpv:.2f}</td><td>{load}</td><td>{cs}</td><td>{err}</td><td>{h20:.2f}</td></tr>"
 
