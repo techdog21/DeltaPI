@@ -148,7 +148,30 @@ def index():
         </div>
     """
 
-    if len(timestamps) >= 2:
+       if len(parsed) >= 2:
+        # Calculate durations per charge mode
+        mode_durations = {}  # { "Bulk": seconds, ... }
+        for i in range(1, len(parsed)):
+            t1 = datetime.fromisoformat(parsed[i - 1][0])
+            t2 = datetime.fromisoformat(parsed[i][0])
+            mode = parsed[i - 1][6]  # charge mode
+            delta = (t2 - t1).total_seconds()
+            mode_durations[mode] = mode_durations.get(mode, 0) + delta
+
+        # Build summary table HTML
+        html += """
+        <div class="table-container" style="margin-top:2em;">
+            <h3>Charge Mode Summary (Last 24 Hours)</h3>
+            <table>
+                <tr><th>Charge Mode</th><th>Time (hh:mm)</th></tr>
+        """
+        for mode, seconds in sorted(mode_durations.items(), key=lambda x: -x[1]):
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            html += f"<tr><td>{mode}</td><td>{hours:02d}:{minutes:02d}</td></tr>"
+        html += "</table></div>"
+
+        # Chart.js graph
         html += f"""
         <script>
         const ctx = document.getElementById('chart').getContext('2d');
@@ -194,7 +217,13 @@ def index():
         </script>
         """
     else:
-        html += "<p><strong>Waiting for more data to display the graph...</strong></p>"
+        html += """
+        <div class="table-container" style="margin-top:2em;">
+            <h3>Charge Mode Summary (Last 24 Hours)</h3>
+            <p><em>Not enough data to compute summary.</em></p>
+        </div>
+        <p><strong>Waiting for more data to display the graph...</strong></p>
+        """
 
     html += "</body></html>"
     return html
