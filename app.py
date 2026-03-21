@@ -53,7 +53,8 @@ import json # For JSON handling
 import logging # For logging
 import sqlite3 # For SQLite database handling
 import shutil # For file operations
-from datetime import datetime, time, timedelta, timezone # For date/time handling
+import requests # For HTTP requests to external APIs (e.g., Render.com)
+from datetime import datetime, timedelta, timezone # For date/time handling
 from collections import defaultdict # For date/time handling and data aggregation
 from flask import Flask, request, jsonify # For Flask 2.0+ compatibility
 from flask_limiter import Limiter # For rate limiting
@@ -80,6 +81,7 @@ os.makedirs(DB_DIR, exist_ok=True) # Ensure the database directory exists
 FERNET_KEY = os.environ.get("FERNET_KEY")
 fernet = Fernet(FERNET_KEY.encode()) if FERNET_KEY else None
 MAX_DAYS = 60 # Maximum days for data queries
+_last_cleanup = 0 # Timestamp of last cleanup operation
 # ------------------ Rate Limiting ------------------ #
 # Initialize Flask-Limiter with a key function to get the remote address
 limiter = Limiter(key_func=get_remote_address)
@@ -182,7 +184,7 @@ def get_disk_status(path="/"):
     Get disk usage for the given path.
     Returns: (usage_percent, color, label)
     """
-    total, used, free = shutil.disk_usage(path)
+    total, used, _ = shutil.disk_usage(path)
     percent = int((used / total) * 100)
 
     if percent < 70:
@@ -191,17 +193,16 @@ def get_disk_status(path="/"):
         return percent, "yellow", "High"
     else:
         return percent, "red", "Critical"
-    
-def cleanup_old_records(db_path="deltapi.db"):
+
+def cleanup_old_records():
     """Delete all records older than 30 days from the logs table."""
     cutoff = datetime.utcnow() - timedelta(days=30)
     cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
-
-    conndelete = sqlite3.connect(db_path)
-    cur = conndelete.cursor()
-    cur.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff_str,))
-    conndelete.commit()
-    conndelete.close()
+    conn = get_db()
+    deleted = conn.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff_str,)).rowcount
+    conn.commit()
+    if deleted:
+        server_log("DB", f"Cleanup: removed {deleted} records older than 30 days", "info")
 
 @app.teardown_appcontext
 def close_db(exception):
@@ -409,10 +410,6 @@ def decrypt_token(token, min_days=1, max_days=MAX_DAYS):
     return days
 
 def get_render_deploy_status():
-    import os
-    import requests
-    from datetime import datetime
-
     api_key = os.getenv("RENDER_API_KEY")
     service_id = os.getenv("SERVICE_ID")
     if not api_key or not service_id:
@@ -502,7 +499,7 @@ def log():
     - 400 if data is malformed or incomplete.
     - 500 if database insertion fails.
     '''
-    last_cleanup = 0
+
     client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
 
     if not request.is_secure:
@@ -531,9 +528,10 @@ def log():
             (timestamp, received, data_str)
         )
         conn.commit() 
-        if time_module.time() - last_cleanup > 86400:
-            cleanup_old_records(DB_PATH)
-            globals()['last_cleanup'] = time_module.time()
+        global _last_cleanup
+        if time_module.time() - _last_cleanup > 86400:
+            cleanup_old_records()
+            _last_cleanup = time_module.time()
 
         server_log("POST", f"Accepted data from {client_ip}", "info")
         return jsonify({"status": "ok"}), 200
@@ -857,10 +855,6 @@ def explore():
     for row in rows:
         try:
             data = json.loads(row["data"])
-
-            def clean_int(v):
-                return int(str(v).replace("\x00", "").strip())
-
             v = clean_int(data.get("V", 0)) / 1000
             i = clean_int(data.get("I", 0)) / 1000
             ppv = clean_int(data.get("PPV", 0))
@@ -978,7 +972,6 @@ def pi_explore():
     Pi Status page — shows up to 10,000 recent entries from the pi_status table with client-side filtering.
     """
     conn = get_db()
-    conn.row_factory = sqlite3.Row  # Enable dict-style access
     rows = conn.execute("""
         SELECT timestamp, cpu_temp, disk, memory, uptime, wifi_signal, fan_speed, pi_name, pi_os, pi_updates
         FROM pi_status
@@ -1117,16 +1110,15 @@ def index():
         try:
             latest_entry = json.loads(rows[0][2])
             last_ts = datetime.fromisoformat(latest_entry.get("timestamp", rows[0][0]))
-        except:
+        except Exception:
             last_ts = datetime.fromisoformat(rows[0][0])
         delta = datetime.utcnow() - last_ts
         if delta.total_seconds() < 600:
             status_color, status_text = "#28a745", "Receiving data"
         else:
-            status_color = "#dc3545", f"No data in {int(delta.total_seconds() // 60)} min"
+            status_color, status_text = "#dc3545", f"No data in {int(delta.total_seconds() // 60)} min"
     else:
-        status_color, status_text = "#dc3545", f"No data in {int(delta.total_seconds() // 60)} min"
-
+        status_color, status_text = "#dc3545", "No data available"
 
     # Pi status
     pi_status_row = None
@@ -1163,6 +1155,7 @@ def index():
             server_log("GET", f"Skipping row due to error: {e}", "warning")
 
     # Metrics
+    parsed_chrono = []
     if not parsed:
         latest_voltage = average_voltage = max_voltage = "N/A"
         average_load = max_load = "N/A"
@@ -1170,7 +1163,6 @@ def index():
         vpv_message = "No data available"
         table_data = []
     else:
-        parsed_chrono =[] # define even if nothing.
         voltages = [p[1] for p in parsed]
         currents = [p[2] for p in parsed]
         loads = [round(v * a, 2) for v, a in zip(voltages, currents)]
@@ -1202,7 +1194,7 @@ def index():
     try:
         battery_wh = 200 * 12
         runtime_str = estimate_runtime_wh(voltages[0] * currents[0], battery_wh)
-    except:
+    except Exception:
         runtime_str = "N/A"
 
     try:
@@ -1215,7 +1207,7 @@ def index():
             estimate_runtime_wh(net_draw, battery_wh) if net_draw > 0
             else "Infinite (solar potential exceeds draw)"
         )
-    except:
+    except Exception:
         starlink_runtime_str = starlink_plus_solar_runtime_str = "N/A"
 
     # Charge mode aggregation
@@ -1279,7 +1271,7 @@ def index():
             (float('inf'), ("red", "stale"))
         ])
         checkin_label = f"{int(checkin_age_min)} min ago"
-    except:
+    except Exception:
         checkin_class, checkin_label = "gray", "Unknown"
 
     try:
@@ -1289,7 +1281,7 @@ def index():
             (70, ("yellow", "Warm")),
             (float('inf'), ("red", "HOT"))
         ])
-    except:
+    except Exception:
         temp_class, temp_label = "gray", "Unknown"
 
     try:
@@ -1301,7 +1293,7 @@ def index():
             (-50, ("green", "Good")),
             (float('inf'), ("green", "Strong"))
         ])
-    except:
+    except Exception:
         wifi_class, wifi_label = "gray", "Unknown"
 
     try:
@@ -1312,7 +1304,7 @@ def index():
             (80, ("green", "Moderate")),
             (float('inf'), ("yellow", "High"))
         ])
-    except:
+    except Exception:
         fan_class, fan_label = "gray", "Unknown"
 
     try:
@@ -1321,16 +1313,24 @@ def index():
             (1, ("green", "Up to date")),
             (float('inf'), ("red", "Updates available"))
         ])
-    except:
+    except Exception:
         updates_class, updates_label = "gray", "Unknown"
 
-        # Always set this first so it's available even if parsing fails
-    is_charging = cs in ("Bulk", "Absorption")
-    if 14.4 <= v <= 14.6 and is_charging: cs = "Fully Charging"
+    # Determine charging state from latest reading
+    if parsed:
+        latest_cs = parsed[0][6]
+        latest_v = parsed[0][1]
+        is_charging = latest_cs in ("Bulk", "Absorption")
+        if 14.4 <= latest_v <= 14.6 and is_charging:
+            latest_cs = "Fully Charging"
+    else:
+        latest_cs = "Unknown"
+        latest_v = 0
+        is_charging = False
     
     try:
         latest_voltage_val = float(latest_voltage.replace("V", "").strip())
-        if cs == "Fully Charging":
+        if latest_cs == "Fully Charging":
             latest_voltage_class, latest_voltage_label = "green", "Fully Charging"
         elif is_charging:
             latest_voltage_class, latest_voltage_label = "green", "Charging"
@@ -1346,10 +1346,10 @@ def index():
                     (float('inf'), ("green", "Charging"))
                 ]
             )
-    except:
-        latest_voltage_class, latest_voltage_label = (
-            ("green", "Charging") if is_charging else ("gray", "Unknown")
-        )
+    except Exception:
+            latest_voltage_class, latest_voltage_label = (
+                ("green", "Charging") if is_charging else ("gray", "Unknown")
+            )
     
     # Estimate SOC based on latest voltage
     if parsed:
@@ -1357,19 +1357,6 @@ def index():
         if is_charging:
             soc_percent, soc_color, soc_label = None, "green", "Charging"
         else:
-            soc_percent = estimate_soc(voltage_float)
-            soc_color, soc_label = soc_pill(soc_percent)
-    else:
-        soc_percent, soc_color, soc_label = 0, "gray", "Unknown"
-    
-    # Estimate SOC based on latest voltage
-    if parsed:
-        voltage_float = voltages[0]  # Keep your original latest reading index
-        if is_charging:
-            # Still charging → no SOC
-            soc_percent, soc_color, soc_label = None, "green", "Charging"
-        else:
-            # Float or resting → show SOC
             soc_percent = estimate_soc(voltage_float)
             soc_color, soc_label = soc_pill(soc_percent)
     else:
@@ -1452,8 +1439,11 @@ def index():
                 <h3>🔆 Solar System Summary</h3>
                 <strong>Status:</strong> <span class="pill" style="background-color: {status_color};">{status_text}</span><br>
                 <strong>Latest Voltage:</strong> {latest_voltage} <span class="pill {latest_voltage_class}">{latest_voltage_label}</span><br>
+                <strong>Average Voltage:</strong> {average_voltage}<br>
+                <strong>Max Voltage:</strong> {max_voltage}<br>
                 <strong>Estimated SOC:</strong> {soc_percent}% <span class="pill" style="background-color: {soc_color};">{soc_label}</span><br>
                 <strong>Max Battery Load:</strong> {max_load}<br>
+                <strong>Average Battery Load:</strong> {average_load}<br>
                 <strong>Runtime Est. Similar Load:</strong> {runtime_str}<br>
                 <strong>Starlink Est. Runtime:</strong> {starlink_runtime_str}<br>
                 <strong>Starlink Runtime w/Solar:</strong> {starlink_plus_solar_runtime_str}<br>
