@@ -1474,7 +1474,7 @@ def index():
 
             <hr style="margin: 1em 0; border-top: 1px solid #ccc;">
             <h3>🐳 Container Status Summary</h3>
-            <strong>Data Volume (/var/data/vedirect):</strong> {data_percent}% <span class="pill {data_class}">{data_label}</span><br>
+            <strong>Data Volume ({DB_DIR}):</strong> {data_percent}% <span class="pill {data_class}">{data_label}</span><br>
             <strong>Days of Data Requested:</strong> {days}<br>
             <strong>Days Available in Dataset:</strong> {existing_days}<br>
         """
