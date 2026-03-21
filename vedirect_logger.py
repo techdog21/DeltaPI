@@ -13,7 +13,7 @@ It also manages Raspberry Pi system health monitoring, including:
 
 Features:
 - Local JSONL logging with automatic pruning of uploaded entries
-- Bulk upload of VE.Direct data to a remote API (every 5 minutes)
+- Bulk upload of VE.Direct data to a remote API (10 min active, 30 min dormant)
 -- reduce off grid data usage and ensure reliable delivery
 - Periodic system health POSTs to `/status` endpoint
 - PWM fan speed control targeting efficient and quiet cooling
@@ -39,7 +39,7 @@ import time
 import requests
 import subprocess
 import socket
-from datetime import datetime
+from datetime import datetime, timedelta
 import RPi.GPIO as GPIO
 
 #  ------------------ Configuration ------------------ #
@@ -55,8 +55,12 @@ ERROR_LOG = "/var/log/vedirect/vedirect_error.log"
 OFFSET_FILE = "/var/log/vedirect/sent_offset.txt"
 POST_SECRET = os.environ.get("POST_SECRET")
 # Ensure log directory exists
-STATUS_INTERVAL = 120  # Send Pi status every 2 min
+ACTIVE_INTERVAL = 600    # 10 min — trip mode (keeps server awake)
+DORMANT_INTERVAL = 1800  # 30 min — stored mode (server sleeps between)
 BASE_URL = "https://deltapi-k3bf.onrender.com"
+TRIP_MODE_FILE = "/home/jerry/trip_mode"
+ARCHIVE_PATH = "/var/log/vedirect/solar_archive.jsonl"
+MAX_ARCHIVE_DAYS = 14
 
 # ------------------ Logging ------------------ #
 def log_error(message):
@@ -271,7 +275,9 @@ def upload_unsent_logs():
                     continue
             if entries and bulk_upload(entries):
                 update_last_sent_offset(f.tell())
+                archive_sent_logs()
                 prune_sent_logs()
+
     except Exception as e:
         log_error(f"[Upload] Bulk error: {e}")
 
@@ -292,6 +298,43 @@ def get_wifi_signal_strength():
     except Exception as e:
         log_error(f"[WiFi] Signal fetch error: {e}")
     return "unknown"
+
+def get_upload_interval():
+    """Return upload interval based on trip mode."""
+    if os.path.exists(TRIP_MODE_FILE):
+        return ACTIVE_INTERVAL
+    return DORMANT_INTERVAL
+
+def archive_sent_logs():
+    """Copy sent entries to archive before pruning, keeping 14 days max."""
+    try:
+        offset = get_last_sent_offset()
+        if offset <= 0:
+            return
+
+        with open(LOG_PATH, "r") as f:
+            sent_data = f.read(offset)
+        with open(ARCHIVE_PATH, "a") as f:
+            f.write(sent_data)
+
+        cutoff = datetime.utcnow() - timedelta(days=MAX_ARCHIVE_DAYS)
+        kept = []
+        with open(ARCHIVE_PATH, "r") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                    ts = datetime.fromisoformat(entry.get("timestamp", ""))
+                    if ts >= cutoff:
+                        kept.append(line)
+                except Exception:
+                    continue
+
+        with open(ARCHIVE_PATH, "w") as f:
+            f.writelines(kept)
+
+        log_error(f"[Archive] Archived sent logs, kept {len(kept)} entries within {MAX_ARCHIVE_DAYS} days")
+    except Exception as e:
+        log_error(f"[Archive] Failed: {e}")
 
 
 def send_pi_status(current_duty):
@@ -357,7 +400,6 @@ def send_pi_status(current_duty):
     try:
         # Send the status POST request
         headers = {"Authorization": f"Bearer {POST_SECRET}"}
-        # Replace the log URL with the status URL
         status_url = BASE_URL + "/status"
         # POST the status data
         r = requests.post(status_url, json=payload, headers=headers, timeout=5)
@@ -410,11 +452,13 @@ def main():
                     except Exception as e:
                         log_error(f"[Log] Local write failed: {e}")
 
-                if time.time() - last_prune_check > STATUS_INTERVAL:
+                interval = get_upload_interval()
+
+                if time.time() - last_prune_check > interval:
                     upload_unsent_logs()
                     last_prune_check = time.time()
 
-                if time.time() - last_status_time > STATUS_INTERVAL:
+                if time.time() - last_status_time > interval:
                     send_pi_status(current_duty)
                     last_status_time = time.time()
 

@@ -92,10 +92,13 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1)
 
 # ------------------ Configuration ------------------ #
-DB_DIR = "/var/data/vedirect" # Directory for SQLite database and logs
-DB_PATH = os.path.join(DB_DIR, "vedirect.db") # Path to SQLite database file
+# DB_DIR = "/var/data/vedirect" # Directory for SQLite database and logs
+# DB_PATH = os.path.join(DB_DIR, "vedirect.db") # Path to SQLite database file
+DB_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(DB_DIR, "vedirect.db")
 POST_SECRET = os.environ.get("POST_SECRET") # Secret for POST requests
-SERVER_LOG = os.path.join(DB_DIR, "server.log") # Path to server log file
+# SERVER_LOG = os.path.join(DB_DIR, "server.log") # Path to server log file
+SERVER_LOG = os.path.join(DB_DIR, "server.log")
 os.makedirs(DB_DIR, exist_ok=True) # Ensure the database directory exists
 
 # Fernet key for encrypting tokens
@@ -1455,7 +1458,7 @@ def index():
     """
 
     # Get server disk usage for root and vedirect
-    data_percent, data_class, data_label = get_disk_status("/var/data/vedirect")
+    data_percent, data_class, data_label = get_disk_status(DB_DIR)
 
     if pi_status_row:
         html += f"""
