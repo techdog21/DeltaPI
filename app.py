@@ -109,6 +109,12 @@ CS_MAP = {
 
 # ------------------ DB Init ------------------ #
 def init_db():
+    """
+    Initializes the SQLite database with required tables if they do not exist.
+    Creates `logs` table for solar data and `pi_status` table for Pi health reports.
+    Adds an index on logs.timestamp for efficient time-based queries.
+    Called at application startup.
+    """
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS logs (
@@ -140,12 +146,21 @@ def init_db():
 init_db()
 
 def get_db():
+    """
+    Returns a persistent SQLite connection for the current Flask request context.
+    Uses sqlite3.Row for dictionary-like access. Connection is closed automatically
+    by close_db() at end of request.
+    """
     if 'db' not in g:
         g.db = sqlite3.connect(DB_PATH)
         g.db.row_factory = sqlite3.Row
     return g.db
 
 def get_disk_status(path="/"):
+    """
+    Returns disk usage for the given path as (percent, color_class, label).
+    Used in the dashboard to show container filesystem health.
+    """
     total, used, _ = shutil.disk_usage(path)
     percent = int((used / total) * 100)
     if percent < 70:
@@ -156,6 +171,11 @@ def get_disk_status(path="/"):
         return percent, "red", "Critical"
 
 def cleanup_old_records():
+    """
+    Deletes all log records older than 30 days from the logs table.
+    Uses get_db() for connection management. Throttled to run once per 24 hours
+    via the _last_cleanup module-level variable in the /log and /log/bulk routes.
+    """
     cutoff = datetime.utcnow() - timedelta(days=30)
     cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
     conn = get_db()
@@ -166,12 +186,17 @@ def cleanup_old_records():
 
 @app.teardown_appcontext
 def close_db(exception):
+    """
+    Closes the SQLite connection at the end of each Flask request context.
+    Prevents connections from persisting beyond their intended scope.
+    """
     db = g.pop('db', None)
     if db is not None:
         db.close()
 
 # ------------------ Helpers ------------------ #
 def build_mode_datasets(modes, daily_mode_totals, days, blue_shades):
+    """Constructs Chart.js-compatible datasets for a stacked bar chart of solar charge modes."""
     datasets = []
     for idx, mode in enumerate(modes):
         data = [round(daily_mode_totals[day].get(mode, 0) / 60, 1) for day in days]
@@ -179,24 +204,41 @@ def build_mode_datasets(modes, daily_mode_totals, days, blue_shades):
     return datasets
 
 def clean_int(value):
+    """
+    Safely converts a value to an integer, stripping null bytes and whitespace.
+    Returns 0 on any failure. Handles stray \\x00 bytes from VE.Direct data.
+    """
     try:
         return int(str(value).replace("\x00", "").strip())
     except Exception:
         return 0
 
 def estimate_runtime_wh(draw_w, battery_wh):
+    """
+    Estimates battery runtime at given power draw. Returns human-readable string
+    like '12.5 hours (~0.5 days)' or 'Idle or charging' if draw < 0.5W.
+    """
     if draw_w > 0.5:
         hours = battery_wh / draw_w
         return f"{hours:.1f} hours (~{hours/24:.1f} days)"
     return "Idle or charging"
 
 def make_status_pill(value, thresholds):
+    """
+    Assigns a CSS class and label based on numeric thresholds.
+    Thresholds are ordered (threshold, (class, label)) pairs.
+    Returns the first match where value < threshold, or the last entry as fallback.
+    """
     for threshold, (cls, label) in thresholds:
         if value < threshold:
             return cls, label
     return thresholds[-1][1]
 
 def build_voltage_series(parsed):
+    """
+    Extracts a voltage time series from parsed solar data for Chart.js.
+    Returns (timestamps, values) where values below 11V are set to None (noise filter).
+    """
     timestamps, values = [], []
     for ts, v, *_ in parsed:
         try:
@@ -208,6 +250,10 @@ def build_voltage_series(parsed):
     return timestamps, values
 
 def server_log(tag, message, level="info"):
+    """
+    Logs a timestamped message with a tag and current route to both server.log
+    and Python's logging module. Falls back to 'N/A' route outside request context.
+    """
     route = request.path if has_request_context() else "N/A"
     timestamp = datetime.utcnow().isoformat()
     entry = f"[{timestamp}] [{tag}] [ROUTE: {route}] {message}\n"
@@ -219,6 +265,10 @@ def server_log(tag, message, level="info"):
     getattr(logging, level)(f"[{tag}] [ROUTE: {route}] {message}")
 
 def decrypt_token(token, min_days=1, max_days=MAX_DAYS):
+    """
+    Decrypts a Fernet token and returns the encoded number of days.
+    Raises ValueError if token is missing, malformed, or days out of range.
+    """
     if not token:
         raise ValueError("Token missing")
     try:
@@ -230,6 +280,10 @@ def decrypt_token(token, min_days=1, max_days=MAX_DAYS):
     return days
 
 def estimate_soc(voltage):
+    """
+    Estimates State of Charge (%) for LiFePO4 batteries based on resting voltage.
+    Only accurate when battery is not under heavy load or active charging.
+    """
     if voltage >= 13.6: return 100
     elif voltage >= 13.4: return 95
     elif voltage >= 13.2: return 90
@@ -244,6 +298,7 @@ def estimate_soc(voltage):
     else: return 5
 
 def soc_pill(soc):
+    """Returns (color_class, label) pill for a given SOC percentage."""
     if soc >= 80: return ("green", "High")
     elif soc >= 50: return ("yellow", "Medium")
     else: return ("red", "Low")
@@ -252,6 +307,11 @@ def soc_pill(soc):
 @app.route("/log", methods=["POST"])
 @limiter.limit("3 per minute")
 def log():
+    """
+    Accepts a single VE.Direct solar data entry via POST.
+    Requires HTTPS and Bearer token auth. Validates required fields (V, I, PPV, VPV, timestamp).
+    Triggers cleanup of records older than 30 days (throttled to once per 24 hours).
+    """
     client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     if not request.is_secure:
         server_log("POST", f"Insecure request rejected from {client_ip}", "warning")
@@ -285,6 +345,12 @@ def log():
 @app.route("/log/bulk", methods=["POST"])
 @limiter.limit("2 per minute")
 def bulk_log():
+    """
+    Accepts a bulk POST of VE.Direct solar data entries as a JSON list.
+    Deduplicates by timestamp against existing records before inserting.
+    Requires HTTPS and Bearer token auth. Primary data ingestion route used by the Pi.
+    Triggers cleanup of records older than 30 days (throttled to once per 24 hours).
+    """
     client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     if not request.is_secure:
         server_log("POST", f"Insecure bulk request from {client_ip}", "warning")
@@ -331,6 +397,10 @@ def bulk_log():
 @app.route("/encrypt_days")
 @limiter.limit("10 per minute")
 def encrypt_days():
+    """
+    Encrypts the requested number of days (1-60) into a Fernet token for secure URL usage.
+    Used by the dashboard's date range selector to prevent tampering with query parameters.
+    """
     try:
         if not request.is_secure:
             server_log("GET", f"Insecure request rejected from {request.remote_addr}", "warning")
@@ -349,6 +419,11 @@ def encrypt_days():
 @app.route("/status", methods=["POST"])
 @limiter.limit("2 per minute")
 def pi_status():
+    """
+    Accepts a POST with Raspberry Pi system health stats (uptime, cpu_temp, disk,
+    memory, ssid, wifi_signal, and optional fan_speed, pi_name, pi_os, pi_updates).
+    Requires HTTPS and Bearer token auth. Stores in pi_status table.
+    """
     client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     if not request.is_secure:
         server_log("POST", f"Insecure status update rejected from {client_ip}", "warning")
@@ -379,6 +454,12 @@ def pi_status():
 # ------------------ Dashboard ------------------ #
 @app.route("/", methods=["GET", "HEAD"])
 def index():
+    """
+    Main dashboard route. Decrypts optional token to determine date range (default 7 days),
+    queries solar and Pi status data, computes metrics (voltage, SOC, runtime estimates),
+    and renders a single-page dashboard with four Chart.js charts and a readings table.
+    Supports light/dark theme toggle via cookie persistence.
+    """
     if request.method == "HEAD":
         return "", 200
 
@@ -631,12 +712,68 @@ def index():
     <meta name="theme-color" content="#0a0a0a">
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
+        :root, [data-theme="dark"] {{
+            --bg: #0a0a0a;
+            --bg-panel: #111;
+            --bg-input: #1a1a1a;
+            --border: #1e1e1e;
+            --border-light: #222;
+            --text: #e0e0e0;
+            --text-muted: #888;
+            --text-dim: #666;
+            --text-table: #bbb;
+            --accent: #4fc3f7;
+            --accent-hover: #81d4fa;
+            --grid-color: #1a1a1a;
+            --row-border: #1a1a1a;
+            --pill-green: #2e7d32;
+            --pill-yellow: #f9a825;
+            --pill-yellow-text: #1a1a1a;
+            --pill-red: #c62828;
+            --pill-gray: #424242;
+            --pill-orange: #e65100;
+            --chart-voltage: #4fc3f7;
+            --chart-voltage-fill: rgba(79,195,247,0.08);
+            --chart-power: #ff9800;
+            --chart-h20: #26a69a;
+            --chart-h20-fill: rgba(38,166,154,0.08);
+            --chart-h21: rgba(102,187,106,0.5);
+            --chart-h21-border: #66bb6a;
+        }}
+        [data-theme="light"] {{
+            --bg: #f4f5f7;
+            --bg-panel: #ffffff;
+            --bg-input: #f0f0f0;
+            --border: #ddd;
+            --border-light: #ccc;
+            --text: #1a1a1a;
+            --text-muted: #666;
+            --text-dim: #999;
+            --text-table: #333;
+            --accent: #0277bd;
+            --accent-hover: #01579b;
+            --grid-color: #e8e8e8;
+            --row-border: #eee;
+            --pill-green: #2e7d32;
+            --pill-yellow: #f9a825;
+            --pill-yellow-text: #1a1a1a;
+            --pill-red: #c62828;
+            --pill-gray: #9e9e9e;
+            --pill-orange: #e65100;
+            --chart-voltage: #0277bd;
+            --chart-voltage-fill: rgba(2,119,189,0.1);
+            --chart-power: #e65100;
+            --chart-h20: #00897b;
+            --chart-h20-fill: rgba(0,137,123,0.1);
+            --chart-h21: rgba(56,142,60,0.4);
+            --chart-h21-border: #388e3c;
+        }}
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
             font-family: 'IBM Plex Sans', sans-serif;
             font-size: 13px;
-            background: #0a0a0a;
-            color: #e0e0e0;
+            background: var(--bg);
+            color: var(--text);
             height: 100vh;
             overflow: hidden;
             display: flex;
@@ -647,16 +784,21 @@ def index():
             align-items: center;
             justify-content: space-between;
             padding: 8px 16px;
-            background: #111;
-            border-bottom: 1px solid #222;
+            background: var(--bg-panel);
+            border-bottom: 1px solid var(--border-light);
             flex-shrink: 0;
         }}
         .header h1 {{
             font-family: 'JetBrains Mono', monospace;
             font-size: 15px;
             font-weight: 700;
-            color: #4fc3f7;
+            color: var(--accent);
             letter-spacing: 1px;
+        }}
+        .header-controls {{
+            display: flex;
+            align-items: center;
+            gap: 12px;
         }}
         .header form {{
             display: flex;
@@ -665,17 +807,17 @@ def index():
         }}
         .header input[type="number"] {{
             width: 48px;
-            background: #1a1a1a;
-            border: 1px solid #333;
-            color: #e0e0e0;
+            background: var(--bg-input);
+            border: 1px solid var(--border-light);
+            color: var(--text);
             padding: 3px 6px;
             border-radius: 4px;
             font-family: 'JetBrains Mono', monospace;
             font-size: 12px;
         }}
-        .header button {{
-            background: #4fc3f7;
-            color: #0a0a0a;
+        .header button, .theme-toggle {{
+            background: var(--accent);
+            color: var(--bg);
             border: none;
             padding: 4px 12px;
             border-radius: 4px;
@@ -684,8 +826,8 @@ def index():
             cursor: pointer;
             font-family: 'IBM Plex Sans', sans-serif;
         }}
-        .header button:hover {{ background: #81d4fa; }}
-        .header label {{ font-size: 11px; color: #888; }}
+        .header button:hover, .theme-toggle:hover {{ background: var(--accent-hover); }}
+        .header label {{ font-size: 11px; color: var(--text-muted); }}
 
         .dashboard {{
             display: grid;
@@ -698,8 +840,8 @@ def index():
         }}
 
         .panel {{
-            background: #111;
-            border: 1px solid #1e1e1e;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
             border-radius: 6px;
             padding: 10px 12px;
             overflow: hidden;
@@ -708,7 +850,7 @@ def index():
             font-family: 'JetBrains Mono', monospace;
             font-size: 11px;
             font-weight: 600;
-            color: #4fc3f7;
+            color: var(--accent);
             text-transform: uppercase;
             letter-spacing: 1.5px;
             margin-bottom: 6px;
@@ -720,8 +862,8 @@ def index():
             font-size: 12px;
             line-height: 1.5;
         }}
-        .metric-label {{ color: #888; }}
-        .metric-value {{ color: #e0e0e0; font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 12px; }}
+        .metric-label {{ color: var(--text-muted); }}
+        .metric-value {{ color: var(--text); font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 12px; }}
 
         .pill {{
             display: inline-block;
@@ -733,15 +875,15 @@ def index():
             line-height: 1.6;
             vertical-align: middle;
         }}
-        .pill.green {{ background: #2e7d32; }}
-        .pill.yellow {{ background: #f9a825; color: #1a1a1a; }}
-        .pill.red {{ background: #c62828; }}
-        .pill.gray {{ background: #424242; }}
-        .pill.orange {{ background: #e65100; }}
+        .pill.green {{ background: var(--pill-green); }}
+        .pill.yellow {{ background: var(--pill-yellow); color: var(--pill-yellow-text); }}
+        .pill.red {{ background: var(--pill-red); }}
+        .pill.gray {{ background: var(--pill-gray); }}
+        .pill.orange {{ background: var(--pill-orange); }}
 
         .chart-panel {{
-            background: #111;
-            border: 1px solid #1e1e1e;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
             border-radius: 6px;
             padding: 6px 8px;
             display: flex;
@@ -751,7 +893,7 @@ def index():
             font-family: 'JetBrains Mono', monospace;
             font-size: 10px;
             font-weight: 600;
-            color: #4fc3f7;
+            color: var(--accent);
             text-transform: uppercase;
             letter-spacing: 1.5px;
             margin-bottom: 4px;
@@ -771,8 +913,8 @@ def index():
 
         .table-panel {{
             grid-column: 1 / -1;
-            background: #111;
-            border: 1px solid #1e1e1e;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
             border-radius: 6px;
             padding: 8px 12px;
             overflow-x: auto;
@@ -782,7 +924,7 @@ def index():
             font-family: 'JetBrains Mono', monospace;
             font-size: 10px;
             font-weight: 600;
-            color: #4fc3f7;
+            color: var(--accent);
             text-transform: uppercase;
             letter-spacing: 1.5px;
             margin-bottom: 4px;
@@ -791,34 +933,60 @@ def index():
         th {{
             font-size: 10px;
             font-weight: 600;
-            color: #666;
+            color: var(--text-dim);
             text-transform: uppercase;
             letter-spacing: 0.5px;
             padding: 3px 6px;
             text-align: center;
-            border-bottom: 1px solid #222;
+            border-bottom: 1px solid var(--border-light);
         }}
         td {{
             font-family: 'JetBrains Mono', monospace;
             font-size: 11px;
             padding: 3px 6px;
             text-align: center;
-            color: #bbb;
-            border-bottom: 1px solid #1a1a1a;
+            color: var(--text-table);
+            border-bottom: 1px solid var(--row-border);
+        }}
+
+        @media (max-width: 768px) {{
+            body {{ overflow: auto; height: auto; }}
+            .dashboard {{
+                grid-template-columns: 1fr;
+                grid-template-rows: auto;
+                overflow: auto;
+            }}
+            .table-panel {{ grid-column: 1; }}
+            .chart-panel {{ min-height: 200px; }}
+            .header {{ flex-wrap: wrap; gap: 6px; }}
+            .header h1 {{ font-size: 13px; }}
+            .metric {{ font-size: 11px; }}
+            .metric-value {{ font-size: 11px; }}
         }}
     </style>
+    <script>
+    // Theme: load from cookie or default to dark
+    (function() {{
+        var match = document.cookie.match(/theme=(dark|light)/);
+        var theme = match ? match[1] : 'dark';
+        document.documentElement.setAttribute('data-theme', theme);
+    }})();
+    </script>
 </head>
 <body>
 
 <div class="header">
     <h1>DELTAPI SOLAR MONITOR</h1>
-    <form method="get" onsubmit="event.preventDefault(); encryptAndSubmit();">
-        <label>Last</label>
-        <input type="number" id="daysInput" value="{days}" min="1" max="60">
-        <label>days</label>
-        <input type="hidden" id="tokenInput" name="token">
-        <button type="submit">Update</button>
-    </form>
+    <div class="header-controls">
+        <form method="get" onsubmit="event.preventDefault(); encryptAndSubmit();">
+            <label>Last</label>
+            <input type="number" id="daysInput" value="{days}" min="1" max="60">
+            <label>days</label>
+            <input type="hidden" id="tokenInput" name="token">
+            <button type="submit">Update</button>
+        </form>
+        <button class="theme-toggle" onclick="toggleTheme()">Light/Dark</button>
+    </div>
 </div>
 
 <div class="dashboard">
@@ -916,6 +1084,20 @@ function encryptAndSubmit() {{
         .catch(() => alert('Encryption error'));
 }}
 
+function toggleTheme() {{
+    var current = document.documentElement.getAttribute('data-theme') || 'dark';
+    var next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    document.cookie = 'theme=' + next + ';path=/;max-age=31536000';
+    // Rebuild charts with new colors
+    location.reload();
+}}
+
+// Read CSS variable values for chart colors
+var style = getComputedStyle(document.documentElement);
+var gridColor = style.getPropertyValue('--grid-color').trim();
+var textMuted = style.getPropertyValue('--text-muted').trim();
+
 const chartOpts = (yMin, yMax, stepSize) => ({{
     responsive: true,
     maintainAspectRatio: false,
@@ -924,7 +1106,7 @@ const chartOpts = (yMin, yMax, stepSize) => ({{
     elements: {{ point: {{ radius: 0 }}, line: {{ borderWidth: 1.5 }} }},
     scales: {{
         x: {{ display: false }},
-        y: {{ min: yMin, max: yMax, ticks: {{ stepSize: stepSize, font: {{ size: 9 }}, color: '#555' }}, grid: {{ color: '#1a1a1a' }} }}
+        y: {{ min: yMin, max: yMax, ticks: {{ stepSize: stepSize, font: {{ size: 9 }}, color: textMuted }}, grid: {{ color: gridColor }} }}
     }}
 }});
 
@@ -933,7 +1115,7 @@ new Chart(document.getElementById('chartPower'), {{
     type: 'line',
     data: {{
         labels: {json.dumps(timestamps)},
-        datasets: [{{ data: {json.dumps(powers)}, borderColor: '#ff9800', fill: false, tension: 0.1 }}]
+        datasets: [{{ data: {json.dumps(powers)}, borderColor: style.getPropertyValue('--chart-power').trim(), fill: false, tension: 0.1 }}]
     }},
     options: chartOpts(0, 305, 50)
 }});
@@ -943,7 +1125,7 @@ new Chart(document.getElementById('chartVoltage'), {{
     type: 'line',
     data: {{
         labels: {json.dumps(voltage_timestamps)},
-        datasets: [{{ data: {json.dumps(voltage_values)}, borderColor: '#4fc3f7', backgroundColor: 'rgba(79,195,247,0.08)', fill: true, tension: 0.3, spanGaps: false }}]
+        datasets: [{{ data: {json.dumps(voltage_values)}, borderColor: style.getPropertyValue('--chart-voltage').trim(), backgroundColor: style.getPropertyValue('--chart-voltage-fill').trim(), fill: true, tension: 0.3, spanGaps: false }}]
     }},
     options: chartOpts(12.5, 14.6, 0.5)
 }});
@@ -954,7 +1136,7 @@ new Chart(document.getElementById('chartH20'), {{
     data: {{
         labels: {json.dumps(h20_days)},
         datasets: [
-            {{ data: {json.dumps(h20_values)}, borderColor: '#26a69a', backgroundColor: 'rgba(38,166,154,0.08)', fill: true, tension: 0.2, pointRadius: 2 }},
+            {{ data: {json.dumps(h20_values)}, borderColor: style.getPropertyValue('--chart-h20').trim(), backgroundColor: style.getPropertyValue('--chart-h20-fill').trim(), fill: true, tension: 0.2, pointRadius: 2 }},
             {{ data: Array({len(h20_days)}).fill(1.5), borderColor: '#c62828', borderDash: [4,3], fill: false, pointRadius: 0 }},
             {{ data: Array({len(h20_days)}).fill(0.14), borderColor: '#f9a825', borderDash: [3,3], fill: false, pointRadius: 0 }}
         ]
@@ -967,7 +1149,7 @@ new Chart(document.getElementById('chartH21'), {{
     type: 'bar',
     data: {{
         labels: {json.dumps(h21_days)},
-        datasets: [{{ data: {json.dumps(h21_values)}, backgroundColor: 'rgba(102,187,106,0.5)', borderColor: '#66bb6a', borderWidth: 1 }}]
+        datasets: [{{ data: {json.dumps(h21_values)}, backgroundColor: style.getPropertyValue('--chart-h21').trim(), borderColor: style.getPropertyValue('--chart-h21-border').trim(), borderWidth: 1 }}]
     }},
     options: chartOpts(0, 300, 50)
 }});
