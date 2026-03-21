@@ -75,7 +75,6 @@ import json # For JSON handling
 import logging # For logging
 import sqlite3 # For SQLite database handling
 import shutil # For file operations
-import requests # For HTTP requests to external APIs (e.g., Render.com)
 from datetime import datetime, timedelta, timezone # For date/time handling
 from collections import defaultdict # For date/time handling and data aggregation
 from flask import Flask, request, jsonify # For Flask 2.0+ compatibility
@@ -95,7 +94,7 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1)
 # ------------------ Configuration ------------------ #
 DB_DIR = "/var/data/vedirect" # Directory for SQLite database and logs
 DB_PATH = os.path.join(DB_DIR, "vedirect.db") # Path to SQLite database file
-POST_SECRET = os.environ.get("POST_SECRET", "deltapiproject123") # Secret for POST requests
+POST_SECRET = os.environ.get("POST_SECRET") # Secret for POST requests
 SERVER_LOG = os.path.join(DB_DIR, "server.log") # Path to server log file
 os.makedirs(DB_DIR, exist_ok=True) # Ensure the database directory exists
 
@@ -430,37 +429,6 @@ def decrypt_token(token, min_days=1, max_days=MAX_DAYS):
         raise ValueError(f"Token days out of range: {days}")
 
     return days
-
-def get_render_deploy_status():
-    api_key = os.getenv("RENDER_API_KEY")
-    service_id = os.getenv("SERVICE_ID")
-    if not api_key or not service_id:
-        return ("gray", "Unknown")
-
-    url = f"https://api.render.com/v1/services/{service_id}/deploys"
-    headers = {"Authorization": f"Bearer {api_key}"}
-
-    try:
-        r = requests.get(url, headers=headers, timeout=5)
-        r.raise_for_status()
-        deploys = r.json()
-        for deploy in deploys:
-            if deploy.get("status") in ("live", "ready", "successful"):
-                dt = datetime.fromisoformat(deploy["updatedAt"].replace("Z", "+00:00"))
-                age_minutes = (datetime.utcnow() - dt).total_seconds() / 60
-
-                deploy_class, deploy_label = make_status_pill(age_minutes, [
-                    (10080, ("green", "Fresh")),       # < 7 days
-                    (20160, ("yellow", "Recent")),     # < 14 days
-                    (43200, ("orange", "Aged")),       # < 30 days
-                    (float('inf'), ("red", "Stale"))   # > 30 days
-                ])
-
-                deploy_time = dt.strftime("%Y-%m-%d %H:%M UTC")
-                return (deploy_class, f"{deploy_time} ({deploy_label})")
-        return ("gray", "No live deploy")
-    except Exception as e:
-        return ("gray", f"Error")
 
 def estimate_soc(voltage):
     """
@@ -1383,9 +1351,6 @@ def index():
             soc_color, soc_label = soc_pill(soc_percent)
     else:
         soc_percent, soc_color, soc_label = 0, "gray", "Unknown"
-    
-    # Render deploy status pills
-    render_class, render_label = get_render_deploy_status()
 
     # Build HTML 1
     html = f"""
@@ -1509,7 +1474,6 @@ def index():
             <strong>Data Volume (/var/data/vedirect):</strong> {data_percent}% <span class="pill {data_class}">{data_label}</span><br>
             <strong>Days of Data Requested:</strong> {days}<br>
             <strong>Days Available in Dataset:</strong> {existing_days}<br>
-            <strong>Render Deploy Status:</strong> <span class="pill {render_class}">{render_label}</span><br>
         """
     else:
         html += "<p><em>No Pi status data available.</em></p>"

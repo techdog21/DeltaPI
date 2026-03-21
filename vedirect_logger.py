@@ -13,7 +13,8 @@ It also manages Raspberry Pi system health monitoring, including:
 
 Features:
 - Local JSONL logging with automatic pruning of uploaded entries
-- Immediate and bulk upload of VE.Direct data to a remote API
+- Bulk upload of VE.Direct data to a remote API (every 5 minutes)
+-- reduce off grid data usage and ensure reliable delivery
 - Periodic system health POSTs to `/status` endpoint
 - PWM fan speed control targeting efficient and quiet cooling
 - Designed for off-grid solar/RV monitoring setups
@@ -52,11 +53,10 @@ FAN_MIN_DUTY = 20  # Minimum speed to reliably spin fan
 LOG_PATH = "/var/log/vedirect/solar_log.jsonl"
 ERROR_LOG = "/var/log/vedirect/vedirect_error.log"
 OFFSET_FILE = "/var/log/vedirect/sent_offset.txt"
-POST_URL = "https://deltapi-k3bf.onrender.com/log"
-POST_SECRET = os.environ.get("POST_SECRET", "deltapiproject123")
+POST_SECRET = os.environ.get("POST_SECRET")
 # Ensure log directory exists
-STATUS_INTERVAL = 300  # Send Pi status every 5 min
-
+STATUS_INTERVAL = 120  # Send Pi status every 2 min
+BASE_URL = "https://deltapi-k3bf.onrender.com"
 
 # ------------------ Logging ------------------ #
 def log_error(message):
@@ -85,10 +85,10 @@ def network_ready(host="8.8.8.8", port=53, timeout=3):
         bool: True if network is up, False otherwise.
     """
     try:
-        socket.setdefaulttimeout(timeout)
-        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((host, port))
+        s = socket.create_connection((host, port), timeout=timeout)
+        s.close()
         return True
-    except:
+    except Exception:
         return False
 
 
@@ -170,7 +170,7 @@ def get_pi_temp():
         result = subprocess.check_output(["vcgencmd", "measure_temp"]).decode()
         temp_str = result.strip().split("=")[1].split("'")[0]
         return float(temp_str)
-    except:
+    except Exception:
         return 0.0
 
 
@@ -189,7 +189,7 @@ def bulk_upload(entries):
         return False
     try:
         headers = {"Authorization": f"Bearer {POST_SECRET}"}
-        resp = requests.post(POST_URL + "/bulk", json=entries, headers=headers, timeout=10)
+        resp = requests.post(BASE_URL + "/log/bulk", json=entries, headers=headers, timeout=10)
         if resp.status_code == 200:
             log_error(f"[Upload] Bulk POST succeeded: {resp.status_code}")
             return True
@@ -211,7 +211,7 @@ def get_last_sent_offset():
     try:
         with open(OFFSET_FILE, "r") as f:
             return int(f.read().strip())
-    except:
+    except Exception:
         return 0
 
 
@@ -231,19 +231,21 @@ def update_last_sent_offset(offset):
 
 
 def prune_sent_logs():
-    """
-    Remove sent log entries from the log file to save space.
-    """
+    """Remove already-uploaded entries from the log file using atomic swap."""
     try:
         offset = get_last_sent_offset()
         if offset <= 0:
             return
-        with open(LOG_PATH, "r+") as f:
+
+        temp_path = LOG_PATH + ".tmp"
+        with open(LOG_PATH, "r") as f:
             f.seek(offset)
-            remaining_data = f.read()
-            f.seek(0)
-            f.write(remaining_data)
-            f.truncate()
+            remaining = f.read()
+
+        with open(temp_path, "w") as f:
+            f.write(remaining)
+
+        os.replace(temp_path, LOG_PATH)
         update_last_sent_offset(0)
         log_error("[Prune] Sent logs pruned successfully")
     except Exception as e:
@@ -265,7 +267,7 @@ def upload_unsent_logs():
             for line in f:
                 try:
                     entries.append(json.loads(line))
-                except:
+                except Exception:
                     continue
             if entries and bulk_upload(entries):
                 update_last_sent_offset(f.tell())
@@ -306,7 +308,7 @@ def send_pi_status(current_duty):
     def safe(cmd, parse):
         try:
             return parse(subprocess.check_output(cmd).decode())
-        except:
+        except Exception:
             return "unknown"
 
     # Get uptime
@@ -356,7 +358,7 @@ def send_pi_status(current_duty):
         # Send the status POST request
         headers = {"Authorization": f"Bearer {POST_SECRET}"}
         # Replace the log URL with the status URL
-        status_url = POST_URL.replace("/log", "/status")
+        status_url = BASE_URL + "/status"
         # POST the status data
         r = requests.post(status_url, json=payload, headers=headers, timeout=5)
         # Check the response status
@@ -408,20 +410,7 @@ def main():
                     except Exception as e:
                         log_error(f"[Log] Local write failed: {e}")
 
-                    if network_ready():
-                        try:
-                            headers = {"Authorization": f"Bearer {POST_SECRET}"}
-                            response = requests.post(POST_URL, json=frame, headers=headers, timeout=5)
-                            if response.status_code == 200:
-                                log_error(f"[Upload] POST succeeded: {response.status_code}")
-                            else:
-                                log_error(f"[Upload] POST failed: {response.status_code} {response.text}")
-                        except Exception as e:
-                            log_error(f"[Upload] Exception: {e}")
-                    else:
-                        log_error("[Network] Offline: Skipping frame upload")
-
-                if time.time() - last_prune_check > 300:
+                if time.time() - last_prune_check > STATUS_INTERVAL:
                     upload_unsent_logs()
                     last_prune_check = time.time()
 
@@ -444,7 +433,6 @@ def main():
 
 
 if __name__ == "__main__":
-    """
-    Entry point of the script.
-    """
+
     main()
+
