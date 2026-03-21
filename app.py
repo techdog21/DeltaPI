@@ -1,21 +1,25 @@
 """
 DeltaPi Solar Monitor Server (Flask App)
 ----------------------------------------
-
-This Flask application collects, stores, and visualizes solar charge controller data and Raspberry Pi system health for off-grid solar monitoring systems such as those used in RVs. 
-It is designed to operate with a VE.Direct-compatible Victron charge controller and one or more Raspberry Pi clients.
+This Flask application collects, stores, and visualizes solar charge controller data
+and Raspberry Pi system health for off-grid solar monitoring systems such as those
+used in RVs. It is designed to operate with a VE.Direct-compatible Victron charge
+controller and one or more Raspberry Pi clients.
 
 Key Features:
 -------------
-• Accepts POSTed VE.Direct solar data entries via `/log` and `/log/bulk`
-• Stores solar data and Pi system health in an SQLite database
-• Provides encrypted token-based access to dashboards, exports, and data
-• Offers a secure dashboard at `/` with time-series charts, system stats, and runtime estimates
-• Supports CSV export (`/export.csv`), Pi health reports (`/status`), and exploratory views (`/explore`, `/pi_explore`)
-• Implements HTTPS enforcement and token-based authorization
-• Includes Flask-Limiter for rate limiting and abuse prevention
-• Uses Fernet encryption for secure token generation
-• Logs all major events to a rotating file-based log (`server.log`)
+- Accepts POSTed VE.Direct solar data entries via `/log` and `/log/bulk`
+- Stores solar data and Pi system health in an SQLite database
+- Provides encrypted token-based access to dashboards, exports, and data
+- Offers a secure dashboard at `/` with time-series charts, system stats, and runtime estimates
+- Supports CSV export (`/export.csv`), Pi health reports (`/status`), and exploratory views (`/explore`, `/pi_explore`)
+- Implements HTTPS enforcement and token-based authorization
+- Includes Flask-Limiter for rate limiting and abuse prevention
+- Uses Fernet encryption for secure token generation
+- Automatic cleanup of records older than 30 days (throttled to once per 24 hours)
+- Render deploy status monitoring via Render API
+- LiFePO4 battery SOC estimation based on resting voltage
+- Logs all major events to a file-based log (`server.log`)
 
 Data Model:
 -----------
@@ -25,25 +29,43 @@ SQLite DB stores:
 
 Routes Overview:
 ----------------
-• `/log`           Accepts a single solar data point via POST
-• `/log/bulk`      Accepts multiple solar data points in a single POST
-• `/status`        Accepts system health stats from a Raspberry Pi
-• `/`              Main dashboard with visualizations and summaries
-• `/export.csv`    Exports solar data to CSV (token required)
-• `/encrypt_days`  Encrypts number of days for secure token use
-• `/debug`         Shows latest 10 raw solar entries (token required)
-• `/explore`       Client-filterable solar data table (up to 10k rows)
-• `/pi_explore`    Client-filterable Pi health data table
+- `/log`           Accepts a single solar data point via POST
+- `/log/bulk`      Accepts multiple solar data points in a single POST
+- `/status`        Accepts system health stats from a Raspberry Pi
+- `/`              Main dashboard with visualizations and summaries
+- `/export.csv`    Exports solar data to CSV (token required)
+- `/encrypt_days`  Encrypts number of days for secure token use
+- `/debug`         Shows latest 10 raw solar entries (token required)
+- `/explore`       Client-filterable solar data table (up to 10k rows)
+- `/pi_explore`    Client-filterable Pi health data table
+
+Dashboard Metrics:
+------------------
+- Latest/Average/Max battery voltage with status pills
+- Estimated SOC (LiFePO4 voltage curve, resting only)
+- Max/Average battery load
+- Runtime estimates (current load, Starlink, Starlink + solar offset)
+- Panel voltage with sunlight condition indicator
+- Daily energy production (H20) with theoretical max and idle threshold lines
+- Daily max solar power output (H21)
+- Daily time in charge modes (stacked bar)
+- Battery voltage over time (line chart)
+- Solar power over time (line chart)
+- Pi system health: CPU temp, Wi-Fi signal, fan speed, disk, memory, uptime, OS updates
+- Container status: disk usage, data retention days, Render deploy age
 
 Security:
 ---------
-• All data ingestion and export routes require HTTPS and a valid bearer token
-• Tokens used in dashboards and exports are encrypted to prevent tampering
+- All data ingestion and export routes require HTTPS and a valid bearer token
+- Tokens used in dashboards and exports are encrypted via Fernet to prevent tampering
+- Rate limiting on all POST and sensitive GET endpoints
 
 Intended Use:
 -------------
-This app is intended to be hosted on a cloud platform (e.g., Render.com) and paired with a field-deployed Raspberry Pi sending VE.Direct and system health data. 
-It supports offline buffering and visualization to aid in remote solar monitoring and diagnostics.
+This app is intended to be hosted on Render.com with persistent storage at
+/var/data/vedirect and paired with a field-deployed Raspberry Pi sending VE.Direct
+and system health data. It supports offline buffering and visualization to aid in
+remote solar monitoring and diagnostics.
 """
 
 # ------------------ Imports ------------------ #
