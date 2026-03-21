@@ -8,7 +8,7 @@ It is designed to operate with a VE.Direct-compatible Victron charge controller 
 Key Features:
 -------------
 • Accepts POSTed VE.Direct solar data entries via `/log` and `/log/bulk`
-• Stores solar data and Pi system health in Turso (libSQL cloud database)
+• Stores solar data and Pi system health in an SQLite database
 • Provides encrypted token-based access to dashboards, exports, and data
 • Offers a secure dashboard at `/` with time-series charts, system stats, and runtime estimates
 • Supports CSV export (`/export.csv`), Pi health reports (`/status`), and exploratory views (`/explore`, `/pi_explore`)
@@ -19,7 +19,7 @@ Key Features:
 
 Data Model:
 -----------
-Turso (libSQL) DB stores:
+SQLite DB stores:
 - `logs`: timestamped solar readings including voltage, current, panel power, charge state, etc.
 - `pi_status`: Raspberry Pi health reports including CPU temp, memory, disk, uptime, Wi-Fi, fan speed.
 
@@ -42,53 +42,51 @@ Security:
 
 Intended Use:
 -------------
-This app is intended to be hosted on a cloud platform (e.g., Render.com free tier) and paired with a field-deployed Raspberry Pi sending VE.Direct and system health data. 
-Database is hosted on Turso (libSQL) — no persistent disk required.
+This app is intended to be hosted on a cloud platform (e.g., Render.com) and paired with a field-deployed Raspberry Pi sending VE.Direct and system health data. 
+It supports offline buffering and visualization to aid in remote solar monitoring and diagnostics.
 """
 
 # ------------------ Imports ------------------ #
-import os
-import time as time_module
-import json
-import logging
-import shutil
-from datetime import datetime, time, timedelta, timezone
-from collections import defaultdict
-from flask import Flask, request, jsonify, g
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from cryptography.fernet import Fernet
-from werkzeug.middleware.proxy_fix import ProxyFix
-from dateutil.parser import parse as parse_date
-from flask import has_request_context, request
-import libsql_client
+import os # For file and directory handling
+import time as time_module # For time-based operations
+import json # For JSON handling
+import logging # For logging
+import sqlite3 # For SQLite database handling
+import shutil # For file operations
+from datetime import datetime, time, timedelta, timezone # For date/time handling
+from collections import defaultdict # For date/time handling and data aggregation
+from flask import Flask, request, jsonify # For Flask 2.0+ compatibility
+from flask_limiter import Limiter # For rate limiting
+from flask_limiter.util import get_remote_address # For rate limiting
+from cryptography.fernet import Fernet # For secure token encryption
+from werkzeug.middleware.proxy_fix import ProxyFix # For Flask 2.0+ compatibility
+from flask import g # For global request context
+from dateutil.parser import parse as parse_date # For flexible date parsing
+from flask import has_request_context, request  # Add these to imports
 
 # ------------------ App Setup ------------------ #
+# Create Flask app and apply ProxyFix middleware
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1)
 
 # ------------------ Configuration ------------------ #
-# Turso database configuration (replaces local SQLite)
-TURSO_DATABASE_URL = os.environ.get("TURSO_DATABASE_URL")  # e.g. libsql://deltapi-yourorg.turso.io
-TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
-
-# Server log — still local (ephemeral, rebuilds on deploy)
-LOG_DIR = "/tmp/deltapi"
-SERVER_LOG = os.path.join(LOG_DIR, "server.log")
-os.makedirs(LOG_DIR, exist_ok=True)
-
-POST_SECRET = os.environ.get("POST_SECRET", "deltapiproject123")
+DB_DIR = "/var/data/vedirect" # Directory for SQLite database and logs
+DB_PATH = os.path.join(DB_DIR, "vedirect.db") # Path to SQLite database file
+POST_SECRET = os.environ.get("POST_SECRET", "deltapiproject123") # Secret for POST requests
+SERVER_LOG = os.path.join(DB_DIR, "server.log") # Path to server log file
+os.makedirs(DB_DIR, exist_ok=True) # Ensure the database directory exists
 
 # Fernet key for encrypting tokens
 FERNET_KEY = os.environ.get("FERNET_KEY")
 fernet = Fernet(FERNET_KEY.encode()) if FERNET_KEY else None
-MAX_DAYS = 60
-
+MAX_DAYS = 60 # Maximum days for data queries
 # ------------------ Rate Limiting ------------------ #
+# Initialize Flask-Limiter with a key function to get the remote address
 limiter = Limiter(key_func=get_remote_address)
 limiter.init_app(app)
 
 # ------------------ Charge State Mapping ------------------ #
+# Maps charge state codes to human-readable strings
 CS_MAP = {
     "0": "Off",
     "1": "Low Power",
@@ -98,40 +96,38 @@ CS_MAP = {
     "5": "Float"
 }
 
-# ------------------ DB Connection Helper ------------------ #
-def get_db():
-    """
-    Returns a synchronous libsql_client for the current request context.
-    Reuses the same client within a single request via Flask's g object.
-    """
-    if 'db' not in g:
-        g.db = libsql_client.create_client_sync(
-            url=TURSO_DATABASE_URL,
-            auth_token=TURSO_AUTH_TOKEN
-        )
-    return g.db
-
-@app.teardown_appcontext
-def close_db(exception):
-    """
-    Closes the libsql client at the end of each request.
-    """
-    db = g.pop('db', None)
-    if db is not None:
-        db.close()
-
 # ------------------ DB Init ------------------ #
+# Initializes the SQLite database with required tables if they do not exist.
 def init_db():
     """
-    Initializes the Turso database with required tables if they do not exist.
-    Uses a standalone client (not request-scoped) since this runs at startup.
+    Initializes the SQLite database with tables for:
+    
+    1. **Solar Data Logs (`logs`)**
+       - Stores timestamped VE.Direct data entries from the solar controller.
+       - Includes:
+         - `id`: Auto-incrementing primary key.
+         - `timestamp`: Timestamp of the solar event from the device.
+         - `received`: UTC time when the server received the entry.
+         - `data`: Raw JSON string containing voltage, current, charge state, etc.
+       - Indexed by `timestamp` for efficient time-based queries.
+
+    2. **Pi System Status (`pi_status`)**
+       - Stores periodic Raspberry Pi health/status updates.
+       - Each record represents a snapshot of system health at a given time.
+       - Includes:
+         - `id`: Auto-incrementing primary key.
+         - `ip`: Sender's IP address (helps if multiple Pis report in).
+         - `timestamp`: UTC time the status was received.
+         - `uptime`: Human-readable uptime string (e.g., "2 days, 3:21").
+         - `cpu_temp`: CPU temperature (e.g., "44.1°C").
+         - `disk`: Disk usage summary (e.g., "3.1G/29G (10%)").
+         - `memory`: RAM usage summary (e.g., "420M/925M (45%)").
+
+    This function is called at application startup to ensure required tables exist.
     """
-    with libsql_client.create_client_sync(
-        url=TURSO_DATABASE_URL,
-        auth_token=TURSO_AUTH_TOKEN
-    ) as client:
+    with sqlite3.connect(DB_PATH) as conn:
         # Logs Table
-        client.execute("""
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT,
@@ -140,8 +136,8 @@ def init_db():
             )
         """)
 
-        # Pi Status Table
-        client.execute("""
+        # Pi Status Table (for system health dashboard)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS pi_status (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ip TEXT,
@@ -160,29 +156,85 @@ def init_db():
         """)
 
         # Index on timestamp for faster queries
-        client.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp)")
 
 
-# Initialize tables at startup
+# Call the init_db function to ensure the database is set up
 init_db()
 
-# ------------------ Helper: Row Access Wrapper ------------------ #
-def row_to_dict(row, columns):
+def get_db():
     """
-    Converts a libsql_client result row (tuple) + column names into a dict.
-    This replaces sqlite3.Row dict-like access throughout the app.
+    Retrieves a persistent SQLite database connection for the current Flask request context.
+    
+    - If a connection doesn't exist yet in `g`, it creates and stores one.
+    - Uses `sqlite3.Row` to allow dictionary-like access to query results.
+
+    Returns:
+        sqlite3.Connection: The database connection to use for this request.
     """
-    return dict(zip(columns, row))
+    if 'db' not in g:
+        g.db = sqlite3.connect(DB_PATH)
+        g.db.row_factory = sqlite3.Row
+    return g.db
+
+def get_disk_status(path="/"):
+    """
+    Get disk usage for the given path.
+    Returns: (usage_percent, color, label)
+    """
+    total, used, free = shutil.disk_usage(path)
+    percent = int((used / total) * 100)
+
+    if percent < 70:
+        return percent, "green", "Normal"
+    elif percent < 90:
+        return percent, "yellow", "High"
+    else:
+        return percent, "red", "Critical"
+    
+def cleanup_old_records(db_path="deltapi.db"):
+    """Delete all records older than 30 days from the logs table."""
+    cutoff = datetime.utcnow() - timedelta(days=30)
+    cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+
+    conndelete = sqlite3.connect(db_path)
+    cur = conndelete.cursor()
+    cur.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff_str,))
+    conndelete.commit()
+    conndelete.close()
+
+@app.teardown_appcontext
+def close_db(exception):
+    """
+    Closes the database connection at the end of each Flask application context (i.e., after each request).
+
+    This prevents database connections from persisting beyond their intended scope and ensures clean teardown.
+    
+    Parameters:
+        exception (Optional[Exception]): Exception, if any, that occurred during the request.
+    """
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
 
 # ------------------ Helper: Mode Datasets ------------------ #
-def build_mode_datasets(modes, daily_mode_totals, days, blue_shades):
+def build_mode_datasets(modes:list, daily_mode_totals:dict, days:list, blue_shades:list) -> list:
     '''
     Constructs Chart.js-compatible datasets for a stacked bar chart of solar charge modes.
+
+    Parameters:
+    - modes (list of str): Unique charge modes (e.g., 'Bulk', 'Float', etc.).
+    - daily_mode_totals (dict): Nested dictionary where daily_mode_totals[day][mode] = minutes.
+    - days (list of str): Ordered list of ISO date strings representing each day.
+    - blue_shades (list of str): List of hex color codes to shade each mode.
+
+    Returns:
+    - list of dicts: Each dict contains the mode label, time-in-hours data, and a background color.
     '''
     datasets = []
     for idx, mode in enumerate(modes):
         data = [
-            round(daily_mode_totals[day].get(mode, 0) / 60, 1)
+            round(daily_mode_totals[day].get(mode, 0) / 60, 1)  # minutes → hours
             for day in days
         ]
         datasets.append({
@@ -196,16 +248,38 @@ def build_mode_datasets(modes, daily_mode_totals, days, blue_shades):
 def clean_int(value):
     """
     Safely converts a value to an integer, stripping null bytes and whitespace.
+
+    Parameters:
+        value (any): The input value, expected to be a string or number.
+
+    Returns:
+        int: The cleaned integer value, or 0 if conversion fails.
+
+    Notes:
+        - Handles stray null bytes (\x00) that may appear in VE.Direct data.
+        - Returns 0 on any exception (invalid input, empty string, etc.).
     """
     try:
         return int(str(value).replace("\x00", "").strip())
     except:
         return 0
-
+    
 # ------------------ Helper: Runtime Estimation ------------------ #
 def estimate_runtime_wh(draw_w, battery_wh):
     """
     Estimates how long a battery can run at the current power draw.
+
+    Parameters:
+        draw_w (float): Current power draw in watts (W).
+        battery_wh (float): Total battery capacity in watt-hours (Wh).
+
+    Returns:
+        str: Human-readable runtime estimate (e.g., "12.5 hours (~0.5 days)"),
+             or "Idle or charging" if the draw is too low to calculate.
+    
+    Notes:
+        - Ignores battery efficiency losses or discharge curves.
+        - Threshold of 0.5 W is used to filter out idle or negligible draw.
     """
     if draw_w > 0.5:
         hours = battery_wh / draw_w
@@ -216,6 +290,26 @@ def estimate_runtime_wh(draw_w, battery_wh):
 def make_status_pill(value, thresholds):
     """
     Assigns a status class and label based on numeric thresholds.
+
+    Parameters:
+        value (float): The value to evaluate (e.g., temperature, signal strength).
+        thresholds (list of tuples): Ordered list of (threshold, (class, label)) pairs.
+            - Each threshold defines the upper bound for a range.
+            - The class is a CSS class (e.g., 'green', 'red') for styling.
+            - The label is a human-readable status description.
+
+    Returns:
+        tuple: (class, label) corresponding to the first threshold the value is below.
+               If none match, returns the class/label from the last threshold.
+    
+    Example:
+        thresholds = [
+            (50, ('green', 'Cool')),
+            (70, ('yellow', 'Warm')),
+            (float('inf'), ('red', 'Hot'))
+        ]
+
+        make_status_pill(66, thresholds) → ('yellow', 'Warm')
     """
     for threshold, (cls, label) in thresholds:
         if value < threshold:
@@ -226,6 +320,22 @@ def make_status_pill(value, thresholds):
 def build_voltage_series(parsed):
     """
     Extracts and formats a voltage time series from parsed solar data.
+
+    Parameters:
+        parsed (list of tuples): Each tuple is expected to contain at least:
+            - ts (str): ISO 8601 timestamp string.
+            - v (float): Voltage reading.
+            - *_: Any additional values (ignored).
+
+    Returns:
+        tuple:
+            - timestamps (list of str): Formatted timestamps as "YYYY-MM-DD HH:MM".
+            - values (list of float or None): Corresponding voltages (rounded to 2 decimals),
+              or None if voltage is below 11 V (e.g., noise, invalid readings).
+
+    Notes:
+        - Skips entries with invalid timestamps.
+        - Useful for generating battery voltage line charts.
     """
     timestamps, values = [], []
     for ts, v, *_ in parsed:
@@ -240,7 +350,22 @@ def build_voltage_series(parsed):
 # ------------------ Helper: Server Log ------------------ #
 def server_log(tag, message, level="info"):
     """
-    Logs a message with a timestamp, a custom tag, and the current request route.
+    Logs a message with a timestamp, a custom tag, and the current request route (if available).
+
+    Parameters:
+        tag (str): A short identifier for the log entry (e.g., "POST", "GET", "DB").
+        message (str): The log message content.
+        level (str): Logging level as a string (e.g., "info", "warning", "error").
+                     Defaults to "info". Must match a method in the `logging` module.
+
+    Behavior:
+        - Writes the log entry to both the console (via Python's `logging` module)
+          and to the local `server.log` file.
+        - Includes the UTC timestamp and current Flask route if in a request context.
+        - Falls back to "N/A" if called outside a request context (e.g., during startup).
+
+    Example Log Format:
+        [2025-07-27T18:00:00Z] [POST] [ROUTE: /log] Accepted data from 192.168.1.2
     """
     route = request.path if has_request_context() else "N/A"
     timestamp = datetime.utcnow().isoformat()
@@ -258,6 +383,17 @@ def server_log(tag, message, level="info"):
 def decrypt_token(token, min_days=1, max_days=MAX_DAYS):
     """
     Safely decrypts a Fernet token and returns the number of days encoded.
+
+    Parameters:
+        token (str): Encrypted Fernet token (URL-safe base64).
+        min_days (int): Minimum allowed days (inclusive).
+        max_days (int): Maximum allowed days (inclusive).
+
+    Returns:
+        int: Number of days if valid.
+
+    Raises:
+        ValueError: If token is missing, malformed, or out of range.
     """
     if not token:
         raise ValueError("Token missing")
@@ -273,7 +409,9 @@ def decrypt_token(token, min_days=1, max_days=MAX_DAYS):
     return days
 
 def get_render_deploy_status():
-    import requests as req_lib
+    import os
+    import requests
+    from datetime import datetime
 
     api_key = os.getenv("RENDER_API_KEY")
     service_id = os.getenv("SERVICE_ID")
@@ -284,7 +422,7 @@ def get_render_deploy_status():
     headers = {"Authorization": f"Bearer {api_key}"}
 
     try:
-        r = req_lib.get(url, headers=headers, timeout=5)
+        r = requests.get(url, headers=headers, timeout=5)
         r.raise_for_status()
         deploys = r.json()
         for deploy in deploys:
@@ -293,21 +431,22 @@ def get_render_deploy_status():
                 age_minutes = (datetime.utcnow() - dt).total_seconds() / 60
 
                 deploy_class, deploy_label = make_status_pill(age_minutes, [
-                    (10080, ("green", "Fresh")),
-                    (20160, ("yellow", "Recent")),
-                    (43200, ("orange", "Aged")),
-                    (float('inf'), ("red", "Stale"))
+                    (10080, ("green", "Fresh")),       # < 7 days
+                    (20160, ("yellow", "Recent")),     # < 14 days
+                    (43200, ("orange", "Aged")),       # < 30 days
+                    (float('inf'), ("red", "Stale"))   # > 30 days
                 ])
 
                 deploy_time = dt.strftime("%Y-%m-%d %H:%M UTC")
                 return (deploy_class, f"{deploy_time} ({deploy_label})")
         return ("gray", "No live deploy")
     except Exception as e:
-        return ("gray", "Error")
+        return ("gray", f"Error")
 
 def estimate_soc(voltage):
     """
-    Estimates SOC for LiFePO4 batteries based on resting voltage.
+    Estimates SOC for LiFePO₄ batteries based on resting voltage.
+    Assumes no heavy load or active charging.
     """
     if voltage >= 13.6:
         return 100
@@ -342,27 +481,28 @@ def soc_pill(soc):
     else:
         return ("red", "Low")
 
-def get_disk_status(path="/"):
-    """
-    Get disk usage for the given path.
-    """
-    total, used, free = shutil.disk_usage(path)
-    percent = int((used / total) * 100)
 
-    if percent < 70:
-        return percent, "green", "Normal"
-    elif percent < 90:
-        return percent, "yellow", "High"
-    else:
-        return percent, "red", "Critical"
-
-# ------------------ POST: Single Log Entry ------------------ #
+# ------------------ Main Dashboard Route ------------------ #
 @app.route("/log", methods=["POST"])
 @limiter.limit("3 per minute")
 def log():
     '''
     Accepts a single VE.Direct solar data entry via POST and stores it in the database.
+
+    Security:
+    - Requires HTTPS.
+    - Requires a valid Bearer token in the Authorization header.
+
+    Payload:
+    - Expects a JSON object with fields like V, I, PPV, VPV, timestamp, etc.
+
+    Returns:
+    - 200 OK on success.
+    - 403 if HTTPS is missing or authorization fails.
+    - 400 if data is malformed or incomplete.
+    - 500 if database insertion fails.
     '''
+    last_cleanup = 0
     client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
 
     if not request.is_secure:
@@ -385,11 +525,16 @@ def log():
     received = datetime.utcnow().isoformat()
     data_str = json.dumps(entry)
     try:
-        client = get_db()
-        client.execute(
+        conn = get_db()
+        conn.execute(
             "INSERT INTO logs (timestamp, received, data) VALUES (?, ?, ?)",
-            [timestamp, received, data_str]
+            (timestamp, received, data_str)
         )
+        conn.commit() 
+        if time_module.time() - last_cleanup > 86400:
+            cleanup_old_records(DB_PATH)
+            globals()['last_cleanup'] = time_module.time()
+
         server_log("POST", f"Accepted data from {client_ip}", "info")
         return jsonify({"status": "ok"}), 200
 
@@ -397,12 +542,25 @@ def log():
         server_log("POST", f"DB error while logging from {client_ip}: {e}", "error")
         return jsonify({"error": "Internal server error"}), 500
 
-# ------------------ POST: Bulk Log Entries ------------------ #
+# ------------------ Bulk Log Route ------------------ #    
 @app.route("/log/bulk", methods=["POST"])
-@limiter.limit("2 per minute")
+@limiter.limit("2 per minute")  # Slightly slower to reduce accidental flooding
 def bulk_log():
     '''
-    Accepts a bulk POST of VE.Direct solar data entries.
+    Accepts a bulk POST of VE.Direct solar data entries, validates, and inserts them into the database.
+
+    - Expects Authorization header: Bearer POST_SECRET
+    - Expects JSON body as a list of entry dicts, each with a "timestamp" key
+
+    For each entry:
+    - Skips duplicates based on existing timestamps in the database
+    - Inserts only new entries with a UTC timestamp and full JSON payload
+
+    Returns:
+    - 200 OK with count of inserted entries if successful
+    - 403 if unauthorized
+    - 400 if JSON is invalid
+    - 500 on any other error
     '''
     client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
 
@@ -424,19 +582,19 @@ def bulk_log():
         return jsonify({"error": "Invalid JSON"}), 400
 
     try:
-        client = get_db()
-
-        # Get existing timestamps to deduplicate
+        conn = get_db()
         timestamps_to_check = [e.get("timestamp") for e in entries if "timestamp" in e]
+        placeholders = ",".join("?" for _ in timestamps_to_check)
 
-        existing_ts = set()
         if timestamps_to_check:
-            # libsql_client doesn't support IN (?) with list expansion the same way
-            # Process in batches to check for existing timestamps
-            for ts in timestamps_to_check:
-                rs = client.execute("SELECT timestamp FROM logs WHERE timestamp = ?", [ts])
-                if rs.rows:
-                    existing_ts.add(ts)
+            existing_ts = set(
+                row[0] for row in conn.execute(
+                    f"SELECT timestamp FROM logs WHERE timestamp IN ({placeholders})",
+                    timestamps_to_check
+                )
+            )
+        else:
+            existing_ts = set()
 
         inserted = 0
         for entry in entries:
@@ -447,11 +605,12 @@ def bulk_log():
             received = datetime.utcnow().isoformat()
             data_str = json.dumps(entry)
 
-            client.execute(
+            conn.execute(
                 "INSERT INTO logs (timestamp, received, data) VALUES (?, ?, ?)",
-                [ts, received, data_str]
+                (ts, received, data_str)
             )
             inserted += 1
+        conn.commit()  # Commit all changes to the database
 
         server_log("POST", f"Bulk insert from {client_ip}: {inserted} new entries", "info")
         return jsonify({"status": "ok", "inserted": inserted}), 200
@@ -459,12 +618,24 @@ def bulk_log():
         server_log("POST", f"Bulk DB insert failed from {client_ip}: {e}", "error")
         return jsonify({"error": str(e)}), 500
 
-# ------------------ GET: Encrypt Days ------------------ #
+# ------------------ Encrypt Days Route ------------------ #
 @app.route("/encrypt_days")
 @limiter.limit("10 per minute")
 def encrypt_days():
     """
     Encrypt the number of days requested by the user for secure URL usage.
+
+    This endpoint is used to generate a secure token that encodes the number of 
+    days of solar data the user wants to view. The token is used in URLs to 
+    prevent tampering.
+
+    Request Parameters:
+        - days (int, 1-60): Number of days to encrypt.
+
+    Returns:
+        - 200 OK: JSON object with the encrypted token.
+        - 400 Bad Request: If input is invalid or encryption fails.
+        - 403 Forbidden: If HTTPS is not used.
     """
     try:
         if not request.is_secure:
@@ -480,39 +651,42 @@ def encrypt_days():
         token = fernet.encrypt(str(days).encode()).decode()
         server_log("GET", f"Token generated for {days} day(s) from {request.remote_addr}", "info")
         return jsonify({"token": token})
-
+    
     except Exception as e:
         server_log("GET", f"/encrypt_days error from {request.remote_addr}: {e}", "error")
         return jsonify({"token": ""}), 400
 
-# ------------------ GET: CSV Export ------------------ #
+# ------------------ CSV Export Route ------------------ #    
 @app.route("/export.csv")
 @limiter.limit("5 per minute")
 def export_csv():
     """
     Export the last N days of VE.Direct data in CSV format.
+    Requires a valid encrypted 'token' query parameter specifying the number of days (1–30).
+    Responds with a downloadable CSV file containing timestamped voltage, current, power,
+    and other key metrics.
     """
+
     try:
         if not request.is_secure:
             server_log("POST", f"CSV export blocked: Insecure request from {request.remote_addr}", "warning")
             return "HTTPS required", 403
 
         token = request.args.get("token")
-        days = decrypt_token(token)
+        days = decrypt_token(token)  # Decrypt the token to get the number of days
     except Exception as e:
         server_log("POST", f"CSV export failed: Invalid or missing token from {request.remote_addr} - {e}", "error")
-        days = 7
+        days = 7  # fallback to 7 days
 
     since = datetime.utcnow() - timedelta(days=days)
     output = "timestamp,voltage,current,ppv,vpv,load,charge_mode,error,h20\n"
 
     try:
-        client = get_db()
-        rs = client.execute(
+        conn = get_db()
+        rows = conn.execute(
             "SELECT timestamp, data FROM logs WHERE timestamp >= ? ORDER BY timestamp DESC",
-            [since.isoformat()]
-        )
-        rows = rs.rows
+            (since.isoformat(),)
+        ).fetchall()
 
     except Exception as db_err:
         server_log("POST", f"CSV export failed: DB read error from {request.remote_addr} - {db_err}", "error")
@@ -542,11 +716,20 @@ def export_csv():
         'Content-Disposition': f'attachment; filename=vedirect_last_{days}_days.csv'
     }
 
-# ------------------ GET: Debug Page ------------------ #
+# ------------------ Debug Route ------------------ #
 @app.route("/debug")
 def debug():
     """
     Render a simple debug page showing the 10 most recent entries in the logs table.
+    
+    Security:
+        - Requires a valid encrypted 'token' query parameter to authorize access.
+        - Intended for admin or developer use only.
+    
+    Returns:
+        - 403 if token is missing, invalid, or out of range.
+        - 500 if database access fails.
+        - 200 HTML page with recent log entries on success.
     """
     token = request.args.get("token")
     if not token:
@@ -554,15 +737,14 @@ def debug():
         return "<p>Unauthorized: token missing.</p>", 403
 
     try:
-        days = decrypt_token(token, min_days=1)
+        days = decrypt_token(token, min_days=1)  # Decrypt the token to get the number of days
     except Exception as e:
         server_log("GET", f"/debug access denied from {request.remote_addr}: {e}", "warning")
         return "<p>Unauthorized or invalid token.</p>", 403
 
     try:
-        client = get_db()
-        rs = client.execute("SELECT timestamp, data FROM logs ORDER BY timestamp DESC LIMIT 10")
-        rows = rs.rows
+        conn = get_db()
+        rows = conn.execute("SELECT timestamp, data FROM logs ORDER BY timestamp DESC LIMIT 10").fetchall()
     except Exception as db_err:
         server_log("GET", f"/debug DB read error from {request.remote_addr}: {db_err}", "error")
         return "<p>Error reading database.</p>", 500
@@ -572,20 +754,42 @@ def debug():
     html = "<html><head><title>Debug Logs</title></head><body>"
     html += "<h2>Latest Entries (Most Recent First)</h2><ul style='font-family: monospace;'>"
 
-    for row in rows:
-        ts, data = row[0], row[1]
-        escaped_data = str(data).replace("<", "&lt;").replace(">", "&gt;")
+    for ts, data in rows:
+        escaped_data = str(data).replace("<", "&lt;").replace(">", "&gt;")  # Simple HTML escaping
         html += f"<li><pre>{ts} - {escaped_data}</pre></li>"
 
-    html += "</ul><p><a href='/'>Back to Dashboard</a></p></body></html>"
+    html += "</ul><p><a href='/'>⬅️ Back to Dashboard</a></p></body></html>"
     return html
 
-# ------------------ POST: Pi Status ------------------ #
+# ------------------ Pi Status Route ------------------ #
 @app.route("/status", methods=["POST"])
 @limiter.limit("2 per minute")
 def pi_status():
     """
     Accepts a POST request from a Raspberry Pi containing system health statistics.
+
+    Expected JSON Payload:
+    {
+        "uptime": "2 days, 3:21",
+        "cpu_temp": "44.0°C / 111.2°F",
+        "disk": "3.1G/29G (10%)",
+        "memory": "420M/925M (45%)",
+        "ssid": "MyWiFi",
+        "wifi_signal": "-66 dBm",
+        "fan_speed": "40%",
+        "pi_name": "delta-zero",
+        "pi_os": "Raspbian GNU/Linux 11 (bullseye)",
+        "pi_updates": "3 available updates"
+    }
+
+    Security:
+    - Requires HTTPS
+    - Requires Authorization header: Bearer POST_SECRET
+
+    Returns:
+    - 200 OK on success
+    - 403 if HTTPS or authorization fails
+    - 400 if required data is missing or malformed
     """
     client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
 
@@ -605,17 +809,18 @@ def pi_status():
         if not all(k in payload for k in required_fields):
             raise ValueError("Missing required status fields")
 
+        # Optional fields with fallback
         fan_speed = payload.get("fan_speed", "unknown")
         pi_name = payload.get("pi_name", "unknown")
         pi_os = payload.get("pi_os", "unknown")
         pi_updates = payload.get("pi_updates", "unknown")
 
-        client = get_db()
-        client.execute(
+        conn = get_db()
+        conn.execute(
             """INSERT INTO pi_status 
             (ip, timestamp, uptime, cpu_temp, disk, memory, ssid, wifi_signal, fan_speed, pi_name, pi_os, pi_updates)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
+            (
                 client_ip,
                 datetime.utcnow().isoformat(),
                 payload["uptime"],
@@ -628,27 +833,33 @@ def pi_status():
                 pi_name,
                 pi_os,
                 pi_updates
-            ]
+            )
         )
+        conn.commit()
         return jsonify({"status": "ok"}), 200
 
     except Exception as e:
         server_log("POST", f"Status update failed from {client_ip}: {e}", "warning")
         return jsonify({"error": "Invalid payload"}), 400
 
-# ------------------ GET: Explore Solar Data ------------------ #
+
+# ------------------ Explore Route ------------------ #
 @app.route("/explore")
 def explore():
     """
-    Explore Data page — shows up to 10,000 recent log entries with client-side filtering.
+    Explore Data page — shows up to 5000 recent log entries with client-side filtering,
+    including H21 (Max Solar Power Today).
     """
-    client = get_db()
-    rs = client.execute("SELECT timestamp, received, data FROM logs ORDER BY timestamp DESC LIMIT 10000")
+    conn = get_db()
+    rows = conn.execute("SELECT timestamp, received, data FROM logs ORDER BY timestamp DESC LIMIT 10000").fetchall()
 
     parsed = []
-    for row in rs.rows:
+    for row in rows:
         try:
-            data = json.loads(row[2])
+            data = json.loads(row["data"])
+
+            def clean_int(v):
+                return int(str(v).replace("\x00", "").strip())
 
             v = clean_int(data.get("V", 0)) / 1000
             i = clean_int(data.get("I", 0)) / 1000
@@ -660,7 +871,7 @@ def explore():
             h20 = clean_int(data.get("H20", 0)) / 100
             h21 = clean_int(data.get("H21", 0))
 
-            ts = data.get("timestamp", row[0])
+            ts = data.get("timestamp", row["timestamp"])
             parsed.append((ts, v, i, round(v * i, 2), ppv, vpv, load, cs, err, h20, h21))
         except:
             continue
@@ -681,8 +892,8 @@ def explore():
         </style>
     </head>
     <body>
-        <h2>Explore Solar Data (Latest 10,000 Entries)</h2>
-        <p><a href="/">Back to Dashboard</a></p>
+        <h2>🔍 Explore Solar Data (Latest 10,000 Entries)</h2>
+        <p><a href="/">⬅️ Back to Dashboard</a></p>
         <table id="explore-table" class="display">
             <thead>
                 <tr>
@@ -699,17 +910,17 @@ def explore():
                     <th>Max Solar Power (H21)</th>
                 </tr>
                 <tr>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
                 </tr>
             </thead>
             <tbody>
@@ -760,19 +971,20 @@ def explore():
 
     return html
 
-# ------------------ GET: Explore Pi Status ------------------ #
+# ------------------ Pi Status Route ------------------ #
 @app.route("/pi_explore")
 def pi_explore():
     """
-    Pi Status page — shows up to 10,000 recent entries from the pi_status table.
+    Pi Status page — shows up to 10,000 recent entries from the pi_status table with client-side filtering.
     """
-    client = get_db()
-    rs = client.execute("""
+    conn = get_db()
+    conn.row_factory = sqlite3.Row  # Enable dict-style access
+    rows = conn.execute("""
         SELECT timestamp, cpu_temp, disk, memory, uptime, wifi_signal, fan_speed, pi_name, pi_os, pi_updates
         FROM pi_status
         ORDER BY timestamp DESC
         LIMIT 10000
-    """)
+    """).fetchall()
 
     html = """
     <html>
@@ -790,50 +1002,50 @@ def pi_explore():
         </style>
     </head>
     <body>
-        <h2>Explore Pi Status (Latest 10,000 Entries)</h2>
-        <p><a href="/">Back to Dashboard</a> | <a href="/explore">Solar Explore</a></p>
+        <h2>🔍 Explore Pi Status (Latest 10,000 Entries)</h2>
+        <p><a href="/">⬅️ Back to Dashboard</a> | <a href="/explore">🌞 Explore Solar Data</a></p>
         <table id="pi-status-table" class="display">
             <thead>
                 <tr>
                     <th>Time</th>
-                    <th>CPU Temp</th>
-                    <th>Disk Usage</th>
-                    <th>Memory Usage</th>
+                    <th>CPU Temp (°C)</th>
+                    <th>Disk Usage (%)</th>
+                    <th>Memory Usage (%)</th>
                     <th>Uptime</th>
-                    <th>Wi-Fi Signal</th>
-                    <th>Fan Speed</th>
+                    <th>Wi-Fi Signal (dBm)</th>
+                    <th>Fan Speed (%)</th>
                     <th>Pi Name</th>
                     <th>Pi OS</th>
                     <th>Pi Updates</th>
                 </tr>
                 <tr>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
-                    <th><input type="text" placeholder="Filter"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
+                    <th><input type="text" placeholder="🔍"/></th>
                 </tr>
             </thead>
             <tbody>
     """
-    for row in rs.rows:
+    for row in rows:
         html += f"""
             <tr>
-                <td>{row[0]}</td>
-                <td>{row[1]}</td>
-                <td>{row[2]}</td>
-                <td>{row[3]}</td>
-                <td>{row[4]}</td>
-                <td>{row[5]}</td>
-                <td>{row[6]}</td>
-                <td>{row[7]}</td>
-                <td>{row[8]}</td>
-                <td>{row[9]}</td>
+                <td>{row['timestamp']}</td>
+                <td>{row['cpu_temp']}</td>
+                <td>{row['disk']}</td>
+                <td>{row['memory']}</td>
+                <td>{row['uptime']}</td>
+                <td>{row['wifi_signal']}</td>
+                <td>{row['fan_speed']}</td>
+                <td>{row['pi_name']}</td>
+                <td>{row['pi_os']}</td>
+                <td>{row['pi_updates']}</td>
             </tr>
         """
 
@@ -864,7 +1076,6 @@ def pi_explore():
     """
 
     return html
-
 # -----------------------------------------------------------#
 # ------------------ Main Dashboard Route ------------------ #
 # -----------------------------------------------------------#
@@ -873,6 +1084,8 @@ def pi_explore():
 def index():
     """
     Main dashboard route.
+    Decrypts optional token to determine date range, retrieves matching data from the database,
+    and begins assembling the dashboard.
     """
     if request.method == "HEAD":
         return "", 200
@@ -890,12 +1103,11 @@ def index():
 
     try:
         since = now - timedelta(days=days)
-        client = get_db()
-        rs = client.execute(
+        conn = get_db()
+        rows = conn.execute(
             "SELECT timestamp, received, data FROM logs WHERE timestamp >= ? ORDER BY timestamp DESC",
-            [since.isoformat()]
-        )
-        rows = rs.rows
+            (since.isoformat(),)
+        ).fetchall()
     except Exception as db_err:
         server_log("GET", f"Database query failed: {db_err}", "error")
         return f"<p>Error reading database: {db_err}</p>"
@@ -911,28 +1123,29 @@ def index():
         if delta.total_seconds() < 600:
             status_color, status_text = "#28a745", "Receiving data"
         else:
-            status_color = "#dc3545"
-            status_text = f"No data in {int(delta.total_seconds() // 60)} min"
+            status_color = "#dc3545", f"No data in {int(delta.total_seconds() // 60)} min"
     else:
-        status_color, status_text = "#dc3545", "No data available"
+        status_color, status_text = "#dc3545", f"No data in {int(delta.total_seconds() // 60)} min"
+
 
     # Pi status
     pi_status_row = None
     try:
-        rs_pi = client.execute(
+        row = conn.execute(
             "SELECT ip, timestamp, uptime, cpu_temp, disk, memory, ssid, wifi_signal, fan_speed, pi_name, pi_os, pi_updates FROM pi_status ORDER BY timestamp DESC LIMIT 1"
-        )
-        if rs_pi.rows:
-            pi_cols = ["ip", "timestamp", "uptime", "cpu_temp", "disk", "memory", "ssid", "wifi_signal", "fan_speed", "pi_name", "pi_os", "pi_updates"]
-            pi_status_row = dict(zip(pi_cols, rs_pi.rows[0]))
+        ).fetchone()
+        if row:
+            pi_status_row = dict(zip(
+                ["ip", "timestamp", "uptime", "cpu_temp", "disk", "memory", "ssid", "wifi_signal", "fan_speed", "pi_name", "pi_os", "pi_updates"], row
+            ))
     except Exception as e:
         server_log("GET", f"Failed to fetch Pi status: {e}", "warning")
 
     # Parse logs
     for row in rows:
         try:
-            data = json.loads(row[2])
-            ts = data.get("timestamp", row[0])
+            data = json.loads(row["data"])
+            ts = data.get("timestamp", row["timestamp"])
             ts_dt = datetime.fromisoformat(ts)
             if ts_dt < since:
                 continue
@@ -957,7 +1170,7 @@ def index():
         vpv_message = "No data available"
         table_data = []
     else:
-        parsed_chrono = []
+        parsed_chrono =[] # define even if nothing.
         voltages = [p[1] for p in parsed]
         currents = [p[2] for p in parsed]
         loads = [round(v * a, 2) for v, a in zip(voltages, currents)]
@@ -976,15 +1189,14 @@ def index():
             "Cloudy"
         )
     vpv_color = (
-        "gray" if latest_vpv < 5 else
-        "green" if 16 <= latest_vpv <= 45 else
-        "red" if latest_vpv > 45 else
-        "amber"
+        "gray" if latest_vpv < 5 else           # gray
+        "green" if 16 <= latest_vpv <= 45 else   # green
+        "red" if latest_vpv > 45 else          # red
+        "amber"                                  # amber for cloudy
     )
 
     # Voltage and current series
-    rs_days = client.execute("SELECT COUNT(DISTINCT DATE(timestamp)) FROM logs")
-    existing_days = rs_days.rows[0][0] if rs_days.rows else 0
+    existing_days = conn.execute("SELECT COUNT(DISTINCT DATE(timestamp)) FROM logs").fetchone()[0]
 
     # Runtime estimates
     try:
@@ -1112,10 +1324,10 @@ def index():
     except:
         updates_class, updates_label = "gray", "Unknown"
 
-    # Always set this first so it's available even if parsing fails
+        # Always set this first so it's available even if parsing fails
     is_charging = cs in ("Bulk", "Absorption")
     if 14.4 <= v <= 14.6 and is_charging: cs = "Fully Charging"
-
+    
     try:
         latest_voltage_val = float(latest_voltage.replace("V", "").strip())
         if cs == "Fully Charging":
@@ -1138,10 +1350,10 @@ def index():
         latest_voltage_class, latest_voltage_label = (
             ("green", "Charging") if is_charging else ("gray", "Unknown")
         )
-
+    
     # Estimate SOC based on latest voltage
     if parsed:
-        voltage_float = voltages[0]
+        voltage_float = voltages[0]  # Keep your original latest reading index
         if is_charging:
             soc_percent, soc_color, soc_label = None, "green", "Charging"
         else:
@@ -1149,7 +1361,20 @@ def index():
             soc_color, soc_label = soc_pill(soc_percent)
     else:
         soc_percent, soc_color, soc_label = 0, "gray", "Unknown"
-
+    
+    # Estimate SOC based on latest voltage
+    if parsed:
+        voltage_float = voltages[0]  # Keep your original latest reading index
+        if is_charging:
+            # Still charging → no SOC
+            soc_percent, soc_color, soc_label = None, "green", "Charging"
+        else:
+            # Float or resting → show SOC
+            soc_percent = estimate_soc(voltage_float)
+            soc_color, soc_label = soc_pill(soc_percent)
+    else:
+        soc_percent, soc_color, soc_label = 0, "gray", "Unknown"
+    
     # Render deploy status pills
     render_class, render_label = get_render_deploy_status()
 
@@ -1196,6 +1421,7 @@ def index():
     </head>
     <body>
         <h2>VE.Direct Solar Data (Last {days} Days)</h2>
+        <!-- Days selection form -->
         <form method='get' style='margin-bottom: 1em;' onsubmit="event.preventDefault(); encryptAndSubmit();">
             <label for='days'>Show data for past</label>
             <input type='number' id='daysInput' value='{days}' min='1' max='60' style='width: 4em;'> days
@@ -1221,8 +1447,9 @@ def index():
     html += f"""
     <table style="width: 100%; margin-bottom: 2em;">
         <tr>
+            <!-- Solar Summary -->
             <td style="vertical-align: top; width: 50%; padding-right: 2em;">
-                <h3>Solar System Summary</h3>
+                <h3>🔆 Solar System Summary</h3>
                 <strong>Status:</strong> <span class="pill" style="background-color: {status_color};">{status_text}</span><br>
                 <strong>Latest Voltage:</strong> {latest_voltage} <span class="pill {latest_voltage_class}">{latest_voltage_label}</span><br>
                 <strong>Estimated SOC:</strong> {soc_percent}% <span class="pill" style="background-color: {soc_color};">{soc_label}</span><br>
@@ -1234,27 +1461,28 @@ def index():
                 
                 <hr style="margin: 1em 0; border-top: 1px solid #ccc;">
                 <h3>Measured Idle Power Draws:</h3>
-                Raspberry Pi Zero 2 + Fan: 2.5 W (0.19 A)<br>
-                Victron MPPT 100|50 (idle): 0.4 W (0.03 A)<br>
-                CO Detector: 0.8 W (0.06 A)<br>
-                USB LED Indicators: 0.4 W (0.03 A)<br>
-                Parasitic 12V Loads: ~0.4 W (0.03 A)<br>
-                Conversion Loss Overhead (~8%): ~0.5 W (0.04 A)<br>
+                • Raspberry Pi Zero 2 + Fan: 2.5 W (0.19 A)<br>
+                • Victron MPPT 100|50 (idle): 0.4 W (0.03 A)<br>
+                • CO Detector: 0.8 W (0.06 A)<br>
+                • USB LED Indicators: 0.4 W (0.03 A)<br>
+                • Parasitic 12V Loads: ~0.4 W (0.03 A)<br>
+                • Conversion Loss Overhead (~8%): ~0.5 W (0.04 A)<br>
                 <b>Total Idle Power Draw: ~5.0 W or ~0.12 kWh (0.38 A)</b><br>
                 <br>
                 <strong>Estimated Active Power Draws:</strong><br>
-                Starlink Mini: 31 W (2.3 A)<br>
-                Fridge (active): ~59 W (4.3 A)<br>
+                • Starlink Mini: 31 W (2.3 A)<br>
+                • Fridge (active): ~59 W (4.3 A)<br>
 
+            <!-- Pi Status -->
             <td style="vertical-align: top; width: 50%; border-left: 1px solid #ccc; padding-left: 2em;">
     """
 
-    # Container disk status (ephemeral on free tier, but still useful to show)
-    data_percent, data_class, data_label = get_disk_status("/tmp")
+    # Get server disk usage for root and vedirect
+    data_percent, data_class, data_label = get_disk_status("/var/data/vedirect")
 
     if pi_status_row:
         html += f"""
-            <h3>Pi System Health</h3>
+            <h3>🤖 Pi System Health</h3>
             <strong>Pi Name: </strong><b><u>{pi_status_row['pi_name'].upper()}</u></b><br>
             <strong>Pi OS:</strong> {pi_status_row.get('pi_os')}<br>
             <strong>Uptime:</strong> {pi_status_row['uptime']}<br>
@@ -1265,9 +1493,8 @@ def index():
             <strong>Wi-Fi SSID:</strong> {pi_status_row.get("ssid", "unknown" )} {pi_status_row.get("wifi_signal", "unknown")} <span class="pill {wifi_class}">{wifi_label}</span><br>
 
             <hr style="margin: 1em 0; border-top: 1px solid #ccc;">
-            <h3>Container Status Summary</h3>
-            <strong>Container Disk (/tmp):</strong> {data_percent}% <span class="pill {data_class}">{data_label}</span><br>
-            <strong>Database:</strong> Turso (libSQL Cloud)<br>
+            <h3>🐳 Container Status Summary</h3>
+            <strong>Data Volume (/var/data/vedirect):</strong> {data_percent}% <span class="pill {data_class}">{data_label}</span><br>
             <strong>Days of Data Requested:</strong> {days}<br>
             <strong>Days Available in Dataset:</strong> {existing_days}<br>
             <strong>Render Deploy Status:</strong> <span class="pill {render_class}">{render_label}</span><br>
@@ -1277,8 +1504,9 @@ def index():
 
     html += "</td></tr></table>"
 
-    # Build HTML 3 - Solar Power Line Chart
+    # Build HTML 3
     html += f"""
+        <!-- Solar Power Line Chart -->
         <h3>Solar Power Line Chart</h3>
         <div id="chart-container" style="width: 100vw; height: 90vh; margin: 0; padding: 0;">
             <canvas id="chart" style="width: 100%; height: 100%;"></canvas>
@@ -1300,7 +1528,7 @@ def index():
             }},
             options: {{
                 responsive: true,
-                maintainAspectRatio: false,
+                maintainAspectRatio: false,  // ← critical line
                 plugins: {{
                     legend: {{ position: 'top' }}
                 }},
@@ -1339,8 +1567,10 @@ def index():
     </script>
     """
 
+
     # Build HTML 4: Battery Voltage Line Chart
     html += f"""
+        <!-- Battery Voltage Line Chart -->
         <h3>Battery Voltage Line Chart</h3>
         <div id="voltage-chart-container" style="width: 100%; height: 90vh; margin: 0; padding: 0;">
             <canvas id="voltageChart" style="width: 100%; height: 100%;"></canvas>
@@ -1490,16 +1720,16 @@ def index():
     }});
     </script>
     """
-
-    # Build HTML 6: Daily Energy Production (H20) Chart
+    # Build HTML 6: Daily Max Energy (H20) Chart
     html += f"""
+    <!-- Daily Energy Production (kWh) -->
     <h3>Daily Energy Production (kWh)</h3>
     <div id="daily-h20-chart-container" style="width: 100%; height: 90vh; margin: 0; padding: 0;">
         <canvas id="dailyH20Chart" style="width: 100%; height: 100%;"></canvas>
     </div>
 
     <script>
-    const theoreticalMax = 1.5;
+    const theoreticalMax = 1.5;  // 300W x 5h = 1.5 kWh
 
     const dhctx = document.getElementById('dailyH20Chart').getContext('2d');
     const dailyH20Chart = new Chart(dhctx, {{
@@ -1578,9 +1808,9 @@ def index():
     }});
     </script>
     """
-
     # Build HTML 6.5: Daily Max Solar Power (H21) Chart
     html += f"""
+    <!-- Daily Max Solar Power (W) -->
     <h3 style="margin-top: 2.5em;">Daily Max Solar Power Output</h3>
     <div id="daily-h21-chart-container" style="width: 100%; height: 90vh; margin: 0; padding: 0;">
         <canvas id="dailyH21Chart" style="width: 100%; height: 100%;"></canvas>
@@ -1655,8 +1885,7 @@ def index():
     }});
     </script>
     """
-
-    # Build 7 - Navigation buttons
+    # Build 7 - Latest Readings Table
     html += """
     
     <script>
@@ -1664,6 +1893,7 @@ def index():
 
     document.addEventListener("DOMContentLoaded", () => {
         if (isStandalone) {
+            // Container for buttons
             const container = document.createElement("div");
             container.style.position = "fixed";
             container.style.top = "1em";
@@ -1673,6 +1903,7 @@ def index():
             container.style.zIndex = "999";
             document.body.appendChild(container);
 
+            // Shared button style
             function styleBtn(el) {
                 el.style.padding = "0.6em 1.2em";
                 el.style.border = "none";
@@ -1686,27 +1917,31 @@ def index():
                 el.style.display = "inline-block";
             }
 
+            // 🔍 Explore (Solar)
             const exploreBtn = document.createElement("a");
-            exploreBtn.textContent = "Solar Explore";
+            exploreBtn.textContent = "🌞 Solar Explore";
             exploreBtn.href = "/explore";
             styleBtn(exploreBtn);
             container.appendChild(exploreBtn);
 
+            // 🤖 Pi Explore (New)
             const piBtn = document.createElement("a");
-            piBtn.textContent = "Pi Explore";
+            piBtn.textContent = "🤖 Pi Explore";
             piBtn.href = "/pi_explore";
             styleBtn(piBtn);
             container.appendChild(piBtn);
 
+            // 📄 CSV
             const csvBtn = document.createElement("a");
-            csvBtn.textContent = "CSV";
+            csvBtn.textContent = "📄 CSV";
             csvBtn.href = "/export.csv?token=" + encodeURIComponent("{token}");
             csvBtn.download = "";
             styleBtn(csvBtn);
             container.appendChild(csvBtn);
 
+            // 🔄 Refresh
             const refreshBtn = document.createElement("a");
-            refreshBtn.textContent = "Refresh";
+            refreshBtn.textContent = "🔄 Refresh";
             refreshBtn.href = "#";
             refreshBtn.onclick = e => { e.preventDefault(); location.reload(); };
             styleBtn(refreshBtn);
@@ -1716,7 +1951,7 @@ def index():
     </script>
     """
 
-    # Build 8 - Latest Readings Table
+    # --- Build 8 - Latest Readings Table ---
     html += """
     <h3 style="margin-top: 2em;">Latest Readings (Most Recent at Top)</h3>
     <div class="table-container" style="margin-top:1em;">
@@ -1759,10 +1994,15 @@ def index():
             </tbody>
         </table>
     </div>
+    """
+
+    # --- Final closing tags ---
+    html += """
     </body>
     </html>
     """
     return html
+
 
 
 if __name__ == "__main__":

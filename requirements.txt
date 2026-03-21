@@ -4,4 +4,3 @@ cryptography
 flask-limiter
 pandas
 requests
-libsql-client
