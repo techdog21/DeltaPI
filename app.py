@@ -682,10 +682,10 @@ def index():
     # SOC
     if parsed:
         voltage_float = voltages[0]
+        soc_percent = estimate_soc(voltage_float)
         if is_charging:
-            soc_percent, soc_color, soc_label = None, "green", "Charging"
+            soc_color, soc_label = "yellow", "Estimated"
         else:
-            soc_percent = estimate_soc(voltage_float)
             soc_color, soc_label = soc_pill(soc_percent)
     else:
         soc_percent, soc_color, soc_label = 0, "gray", "Unknown"
@@ -993,7 +993,7 @@ def index():
         <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill" style="background:{status_color};">{status_text}</span></span></div>
         <div class="metric"><span class="metric-label">Voltage</span><span class="metric-value">{latest_voltage} <span class="pill {latest_voltage_class}">{latest_voltage_label}</span></span></div>
         <div class="metric"><span class="metric-label">Avg / Max V</span><span class="metric-value">{average_voltage} / {max_voltage}</span></div>
-        <div class="metric"><span class="metric-label">State of Charge (SOC)</span><span class="metric-value">{f'{soc_percent}%' if soc_percent is not None else ''} <span class="pill" style="background:{soc_color};">{soc_label}</span></span></div>
+        <div class="metric"><span class="metric-label">State of Charge (SOC)</span><span class="metric-value">{soc_percent}% <span class="pill" style="background:{soc_color};">{soc_label}</span></span></div>
         <div class="metric"><span class="metric-label">Load (avg/max)</span><span class="metric-value">{average_load} / {max_load}</span></div>
         <div class="metric"><span class="metric-label">Runtime Est.</span><span class="metric-value">{runtime_str}</span></div>
         <div class="metric"><span class="metric-label">Starlink</span><span class="metric-value">{starlink_runtime_str}</span></div>
