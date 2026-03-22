@@ -163,9 +163,9 @@ def get_disk_status(path="/"):
     """
     total, used, _ = shutil.disk_usage(path)
     percent = int((used / total) * 100)
-    if percent < 70:
+    if percent < 85:
         return percent, "green", "Normal"
-    elif percent < 90:
+    elif percent < 95:
         return percent, "yellow", "High"
     else:
         return percent, "red", "Critical"
@@ -583,12 +583,8 @@ def index():
         h21_today = parsed[0][9]
         solar_offset_wh = (h21_today / 1000) * 5000
         net_draw = starlink_watt_draw - (solar_offset_wh / 24)
-        starlink_plus_solar_runtime_str = (
-            estimate_runtime_wh(net_draw, battery_wh) if net_draw > 0
-            else "Infinite (solar exceeds draw)"
-        )
     except Exception:
-        starlink_runtime_str = starlink_plus_solar_runtime_str = "N/A"
+        starlink_runtime_str = "N/A"
 
     # H20/H21 aggregation
     daily_h20 = defaultdict(float)
@@ -986,6 +982,7 @@ def index():
             <button type="submit">Update</button>
         </form>
         <button class="theme-toggle" onclick="toggleTheme()">Light/Dark</button>
+        <button class="theme-toggle" onclick="location.reload()">Refresh</button>
     </div>
 </div>
 
@@ -996,11 +993,10 @@ def index():
         <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill" style="background:{status_color};">{status_text}</span></span></div>
         <div class="metric"><span class="metric-label">Voltage</span><span class="metric-value">{latest_voltage} <span class="pill {latest_voltage_class}">{latest_voltage_label}</span></span></div>
         <div class="metric"><span class="metric-label">Avg / Max V</span><span class="metric-value">{average_voltage} / {max_voltage}</span></div>
-        <div class="metric"><span class="metric-label">SOC</span><span class="metric-value">{soc_percent}% <span class="pill" style="background:{soc_color};">{soc_label}</span></span></div>
+        <div class="metric"><span class="metric-label">State of Charge (SOC)</span><span class="metric-value">{f'{soc_percent}%' if soc_percent is not None else ''} <span class="pill" style="background:{soc_color};">{soc_label}</span></span></div>
         <div class="metric"><span class="metric-label">Load (avg/max)</span><span class="metric-value">{average_load} / {max_load}</span></div>
         <div class="metric"><span class="metric-label">Runtime Est.</span><span class="metric-value">{runtime_str}</span></div>
         <div class="metric"><span class="metric-label">Starlink</span><span class="metric-value">{starlink_runtime_str}</span></div>
-        <div class="metric"><span class="metric-label">Starlink+Solar</span><span class="metric-value">{starlink_plus_solar_runtime_str}</span></div>
         <div class="metric"><span class="metric-label">Panel (VPV)</span><span class="metric-value">{latest_vpv:.2f} V <span class="pill" style="background:{vpv_color};">{vpv_message}</span></span></div>
     </div>
 
