@@ -69,12 +69,11 @@ import shutil
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from collections import defaultdict
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from cryptography.fernet import Fernet
 from werkzeug.middleware.proxy_fix import ProxyFix
-from flask import g
 from dateutil.parser import parse as parse_date
 from flask import has_request_context, request
 
@@ -355,7 +354,7 @@ def log():
         return jsonify({"error": "Internal server error"}), 500
 
 @app.route("/log/bulk", methods=["POST"])
-@limiter.limit("2 per minute")
+@limiter.limit("5 per minute")
 def bulk_log():
     """
     Accepts a bulk POST of VE.Direct solar data entries as a JSON list.

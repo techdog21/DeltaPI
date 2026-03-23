@@ -55,10 +55,8 @@ ERROR_LOG = "/var/log/vedirect/vedirect_error.log"
 OFFSET_FILE = "/var/log/vedirect/sent_offset.txt"
 POST_SECRET = os.environ.get("POST_SECRET")
 # Ensure log directory exists
-ACTIVE_INTERVAL = 600    # 10 min — trip mode (keeps server awake)
-DORMANT_INTERVAL = 1800  # 30 min — stored mode (server sleeps between)
+UPLOAD_INTERVAL = 120    # 2 min — near real-time
 BASE_URL = "https://deltapi-k3bf.onrender.com"
-TRIP_MODE_FILE = "/home/jerry/trip_mode"
 ARCHIVE_PATH = "/var/log/vedirect/solar_archive.jsonl"
 MAX_ARCHIVE_DAYS = 14
 
@@ -300,10 +298,8 @@ def get_wifi_signal_strength():
     return "unknown"
 
 def get_upload_interval():
-    """Return upload interval based on trip mode."""
-    if os.path.exists(TRIP_MODE_FILE):
-        return ACTIVE_INTERVAL
-    return DORMANT_INTERVAL
+    """Return upload interval."""
+    return UPLOAD_INTERVAL
 
 def archive_sent_logs():
     """Copy sent entries to archive before pruning, keeping 14 days max."""
@@ -522,7 +518,7 @@ def main():
             except Exception as e:
                 log_error(f"[Loop] Error: {e}")
 
-            time.sleep(60)
+            time.sleep(15)
 
     finally:
         if pwm is not None:
