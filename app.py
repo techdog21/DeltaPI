@@ -176,7 +176,7 @@ def cleanup_old_records():
     Uses get_db() for connection management. Throttled to run once per 24 hours
     via the _last_cleanup module-level variable in the /log and /log/bulk routes.
     """
-    cutoff = datetime.utcnow() - timedelta(days=30)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
     cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
     conn = get_db()
     deleted = conn.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff_str,)).rowcount
@@ -255,7 +255,7 @@ def server_log(tag, message, level="info"):
     and Python's logging module. Falls back to 'N/A' route outside request context.
     """
     route = request.path if has_request_context() else "N/A"
-    timestamp = datetime.utcnow().isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
     entry = f"[{timestamp}] [{tag}] [ROUTE: {route}] {message}\n"
     try:
         with open(SERVER_LOG, "a") as f:
@@ -325,8 +325,8 @@ def log():
     required_fields = ["V", "I", "PPV", "VPV", "timestamp"]
     if not all(field in entry for field in required_fields):
         return jsonify({"error": "Malformed data – missing required fields"}), 400
-    timestamp = entry.get("timestamp", datetime.utcnow().isoformat())
-    received = datetime.utcnow().isoformat()
+    timestamp = entry.get("timestamp", datetime.now(timezone.utc).isoformat())
+    received = datetime.now(timezone.utc).isoformat()
     data_str = json.dumps(entry)
     try:
         conn = get_db()
@@ -379,7 +379,7 @@ def bulk_log():
             ts = entry.get("timestamp")
             if not ts or ts in existing_ts:
                 continue
-            received = datetime.utcnow().isoformat()
+            received = datetime.now(timezone.utc).isoformat()
             data_str = json.dumps(entry)
             conn.execute("INSERT INTO logs (timestamp, received, data) VALUES (?, ?, ?)", (ts, received, data_str))
             inserted += 1
@@ -440,7 +440,7 @@ def pi_status():
         conn.execute(
             """INSERT INTO pi_status (ip, timestamp, uptime, cpu_temp, disk, memory, ssid, wifi_signal, fan_speed, pi_name, pi_os, pi_updates)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (client_ip, datetime.utcnow().isoformat(), payload["uptime"], payload["cpu_temp"],
+            (client_ip, datetime.now(timezone.utc).isoformat(), payload["uptime"], payload["cpu_temp"],
              payload["disk"], payload["memory"], payload["ssid"], payload["wifi_signal"],
              payload.get("fan_speed", "unknown"), payload.get("pi_name", "unknown"),
              payload.get("pi_os", "unknown"), payload.get("pi_updates", "unknown"))
@@ -463,10 +463,8 @@ def index():
     if request.method == "HEAD":
         return "", 200
 
-    status_text = "Unknown"
-    status_color = "gray"
     parsed = []
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     token = request.args.get("token")
 
     try:
@@ -492,7 +490,7 @@ def index():
             last_ts = datetime.fromisoformat(latest_entry.get("timestamp", rows[0][0]))
         except Exception:
             last_ts = datetime.fromisoformat(rows[0][0])
-        delta = datetime.utcnow() - last_ts
+        delta = datetime.now(timezone.utc) - last_ts
         if delta.total_seconds() < 600:
             status_color, status_text = "green", "Receiving data"
         else:
@@ -578,11 +576,7 @@ def index():
         runtime_str = "N/A"
 
     try:
-        starlink_watt_draw = 31
-        starlink_runtime_str = estimate_runtime_wh(starlink_watt_draw, battery_wh)
-        h21_today = parsed[0][9]
-        solar_offset_wh = (h21_today / 1000) * 5000
-        net_draw = starlink_watt_draw - (solar_offset_wh / 24)
+        starlink_runtime_str = estimate_runtime_wh(31, battery_wh)
     except Exception:
         starlink_runtime_str = "N/A"
 
@@ -611,7 +605,7 @@ def index():
     # Pi health pills
     try:
         last_checkin_dt = parse_date(pi_status_row['timestamp'])
-        now = datetime.utcnow() if last_checkin_dt.tzinfo is None else datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc) if last_checkin_dt.tzinfo is None else datetime.now(timezone.utc)
         checkin_age_min = (now - last_checkin_dt).total_seconds() / 60
         checkin_class, checkin_label = make_status_pill(checkin_age_min, [
             (15, ("green", "recent")), (30, ("yellow", "moderate")), (float('inf'), ("red", "stale"))
@@ -993,7 +987,7 @@ def index():
         <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill {status_color}">{status_text}</span></span></div>
         <div class="metric"><span class="metric-label">Voltage</span><span class="metric-value">{latest_voltage} <span class="pill {latest_voltage_class}">{latest_voltage_label}</span></span></div>
         <div class="metric"><span class="metric-label">Avg / Max V</span><span class="metric-value">{average_voltage} / {max_voltage}</span></div>
-        <div class="metric"><span class="metric-label">State of Charge (SOC)</span><span class="metric-value">{soc_percent}% <span class="pill" style="background:{soc_color};">{soc_label}</span></span></div>
+        <div class="metric"><span class="metric-label">State of Charge (SOC)</span><span class="metric-value">{soc_percent}% <span class="pill {soc_color}">{soc_label}</span></span></div>
         <div class="metric"><span class="metric-label">Load (avg/max)</span><span class="metric-value">{average_load} / {max_load}</span></div>
         <div class="metric"><span class="metric-label">Runtime Est.</span><span class="metric-value">{runtime_str}</span></div>
         <div class="metric"><span class="metric-label">Starlink</span><span class="metric-value">{starlink_runtime_str}</span></div>
@@ -1133,8 +1127,8 @@ new Chart(document.getElementById('chartH20'), {{
         labels: {json.dumps(h20_days)},
         datasets: [
             {{ data: {json.dumps(h20_values)}, borderColor: style.getPropertyValue('--chart-h20').trim(), backgroundColor: style.getPropertyValue('--chart-h20-fill').trim(), fill: true, tension: 0.2, pointRadius: 2 }},
-            {{ data: Array({len(h20_days)}).fill(1.5), borderColor: '#c62828', borderDash: [4,3], fill: false, pointRadius: 0 }},
-            {{ data: Array({len(h20_days)}).fill(0.14), borderColor: '#f9a825', borderDash: [3,3], fill: false, pointRadius: 0 }}
+            {{ data: Array({len(h20_days)}).fill(1.5), borderColor: style.getPropertyValue('--pill-red').trim(), borderDash: [4,3], fill: false, pointRadius: 0 }},
+            {{ data: Array({len(h20_days)}).fill(0.14), borderColor: style.getPropertyValue('--pill-yellow').trim(), borderDash: [3,3], fill: false, pointRadius: 0 }}
         ]
     }},
     options: chartOpts(0, 1.6, 0.4)
