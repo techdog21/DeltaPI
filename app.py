@@ -303,6 +303,10 @@ def soc_pill(soc):
     elif soc >= 50: return ("yellow", "Medium")
     else: return ("red", "Low")
 
+def ensure_utc(dt):
+    """Assume UTC if datetime is naive (e.g. from SQLite)."""
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
 # ------------------ Routes ------------------ #
 @app.route("/log", methods=["POST"])
 @limiter.limit("3 per minute")
@@ -490,6 +494,8 @@ def index():
             last_ts = datetime.fromisoformat(latest_entry.get("timestamp", rows[0][0]))
         except Exception:
             last_ts = datetime.fromisoformat(rows[0][0])
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.replace(tzinfo=timezone.utc)
         delta = datetime.now(timezone.utc) - last_ts
         if delta.total_seconds() < 600:
             status_color, status_text = "green", "Receiving data"
@@ -605,8 +611,9 @@ def index():
     # Pi health pills
     try:
         last_checkin_dt = parse_date(pi_status_row['timestamp'])
-        now = datetime.now(timezone.utc) if last_checkin_dt.tzinfo is None else datetime.now(timezone.utc)
-        checkin_age_min = (now - last_checkin_dt).total_seconds() / 60
+        if last_checkin_dt.tzinfo is None:
+            last_checkin_dt = last_checkin_dt.replace(tzinfo=timezone.utc)
+        checkin_age_min = (datetime.now(timezone.utc) - last_checkin_dt).total_seconds() / 60
         checkin_class, checkin_label = make_status_pill(checkin_age_min, [
             (15, ("green", "recent")), (30, ("yellow", "moderate")), (float('inf'), ("red", "stale"))
         ])
