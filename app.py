@@ -464,7 +464,7 @@ def index():
         return "", 200
 
     status_text = "Unknown"
-    status_color = "#999"
+    status_color = "gray"
     parsed = []
     now = datetime.utcnow()
     token = request.args.get("token")
@@ -494,11 +494,11 @@ def index():
             last_ts = datetime.fromisoformat(rows[0][0])
         delta = datetime.utcnow() - last_ts
         if delta.total_seconds() < 600:
-            status_color, status_text = "#28a745", "Receiving data"
+            status_color, status_text = "green", "Receiving data"
         else:
-            status_color, status_text = "#dc3545", f"No data in {int(delta.total_seconds() // 60)} min"
+            status_color, status_text = "red", f"No data in {int(delta.total_seconds() // 60)} min"
     else:
-        status_color, status_text = "#dc3545", "No data available"
+        status_color, status_text = "red", "No data available"
 
     # Pi status
     pi_status_row = None
@@ -565,7 +565,7 @@ def index():
         "gray" if latest_vpv < 5 else
         "green" if 16 <= latest_vpv <= 45 else
         "red" if latest_vpv > 45 else
-        "amber"
+        "yellow"
     )
 
     existing_days = conn.execute("SELECT COUNT(DISTINCT DATE(timestamp)) FROM logs").fetchone()[0]
@@ -990,14 +990,14 @@ def index():
     <!-- Solar Summary -->
     <div class="panel">
         <h2>Solar System</h2>
-        <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill" style="background:{status_color};">{status_text}</span></span></div>
+        <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill {status_color}">{status_text}</span></span></div>
         <div class="metric"><span class="metric-label">Voltage</span><span class="metric-value">{latest_voltage} <span class="pill {latest_voltage_class}">{latest_voltage_label}</span></span></div>
         <div class="metric"><span class="metric-label">Avg / Max V</span><span class="metric-value">{average_voltage} / {max_voltage}</span></div>
         <div class="metric"><span class="metric-label">State of Charge (SOC)</span><span class="metric-value">{soc_percent}% <span class="pill" style="background:{soc_color};">{soc_label}</span></span></div>
         <div class="metric"><span class="metric-label">Load (avg/max)</span><span class="metric-value">{average_load} / {max_load}</span></div>
         <div class="metric"><span class="metric-label">Runtime Est.</span><span class="metric-value">{runtime_str}</span></div>
         <div class="metric"><span class="metric-label">Starlink</span><span class="metric-value">{starlink_runtime_str}</span></div>
-        <div class="metric"><span class="metric-label">Panel (VPV)</span><span class="metric-value">{latest_vpv:.2f} V <span class="pill" style="background:{vpv_color};">{vpv_message}</span></span></div>
+        <div class="metric"><span class="metric-label">Panel (VPV)</span><span class="metric-value">{latest_vpv:.2f} V <span class="pill {vpv_color}">{vpv_message}</span></span></div>
     </div>
 
     <!-- Pi Health -->
