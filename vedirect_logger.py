@@ -98,24 +98,24 @@ def network_ready(host="8.8.8.8", port=53, timeout=3):
 
 # ------------------ Fan Control ------------------ #
 def setup_fan():
-    """
-    Initialize the GPIO and PWM for fan control.
-
-    Returns:
-        tuple: PWM object and initial duty cycle.
-    """
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(FAN_PIN, GPIO.OUT)
-    pwm = GPIO.PWM(FAN_PIN, PWM_FREQ)
-    pwm.start(0)  # Start fully off
-    log_error(f"[Fan] Initialized at 0% duty cycle")
-    return pwm, 0
+    try:
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(FAN_PIN, GPIO.OUT)
+        pwm = GPIO.PWM(FAN_PIN, PWM_FREQ)
+        pwm.start(0)
+        log_error("[Fan] Initialized at 0% duty cycle")
+        return pwm, 0
+    except Exception as e:
+        log_error(f"[Fan] Not found or init failed: {e}")
+        return None, 0
 
 def update_fan(pwm, temp, current_duty):
     """
     Adjust fan speed for quiet operation targeting 40°C.
     Fan is completely off below OFF_TEMP.
     """
+    if pwm is None:
+        return 0
     if temp <= OFF_TEMP:
         new_duty = 0  # Fan fully off
     elif temp >= ON_TEMP:
@@ -337,12 +337,13 @@ def archive_sent_logs():
         log_error(f"[Archive] Failed: {e}")
 
 
-def send_pi_status(current_duty):
+def send_pi_status(current_duty, fan_available=True):
     """
     Send the Raspberry Pi's system status and fan speed to the remote server.
 
     Args:
         current_duty (int): Current fan duty cycle (%).
+        fan_available (bool): Whether the fan is available.
     """
     if not network_ready():
         log_error("[Network] Offline: Skipping Pi status POST")
@@ -391,7 +392,7 @@ def send_pi_status(current_duty):
         "memory": memory,
         "ssid": ssid,
         "wifi_signal": wifi_signal,
-        "fan_speed": f"{current_duty}%",
+        "fan_speed": f"{current_duty}%" if fan_available else "N/A",
         "pi_name": hostname,
         "pi_os": os_version,
         "pi_updates": updates
@@ -410,6 +411,58 @@ def send_pi_status(current_duty):
             log_error(f"[Status] POST failed: {r.status_code} {r.text}")
     except Exception as e:
         log_error(f"[Status] Exception: {e}")
+
+def backfill_from_archive():
+    """If server has no data, replay local archive to repopulate after a redeploy."""
+    if not network_ready():
+        return
+    try:
+        resp = requests.get(BASE_URL + "/log/bulk", timeout=5)
+        # Server returns 405 for GET on POST-only route = server is up
+    except Exception:
+        return
+
+    try:
+        entries = []
+        if not os.path.exists(ARCHIVE_PATH):
+            log_error("[Backfill] No archive file found")
+            return
+
+        with open(ARCHIVE_PATH, "r") as f:
+            for line in f:
+                try:
+                    entries.append(json.loads(line))
+                except Exception:
+                    continue
+
+        if not entries:
+            log_error("[Backfill] Archive empty")
+            return
+
+        # Ask server how many records it has
+        headers = {"Authorization": f"Bearer {POST_SECRET}"}
+        resp = requests.post(
+            BASE_URL + "/log/bulk",
+            json=entries[:1],  # Send 1 entry to test; dedup will skip if exists
+            headers=headers,
+            timeout=10
+        )
+        result = resp.json()
+
+        # If server inserted it, server was empty — send everything
+        if result.get("inserted", 0) > 0:
+            log_error(f"[Backfill] Server looks fresh, replaying {len(entries)} archived entries")
+            BATCH = 50
+            for i in range(0, len(entries), BATCH):
+                batch = entries[i:i + BATCH]
+                bulk_upload(batch)
+                time.sleep(1)  # Be gentle on rate limits
+            log_error("[Backfill] Archive replay complete")
+        else:
+            log_error("[Backfill] Server already has data, skipping backfill")
+
+    except Exception as e:
+        log_error(f"[Backfill] Failed: {e}")
 
 # ------------------ Main ------------------ #
 def main():
@@ -435,7 +488,8 @@ def main():
                 time.sleep(30)
 
         upload_unsent_logs()
-
+        backfill_from_archive()
+        fan_available = pwm is not None
         last_prune_check = time.time()
         last_status_time = 0
 
@@ -459,7 +513,7 @@ def main():
                     last_prune_check = time.time()
 
                 if time.time() - last_status_time > interval:
-                    send_pi_status(current_duty)
+                    send_pi_status(current_duty, fan_available)
                     last_status_time = time.time()
 
                 temp = get_pi_temp()
@@ -471,8 +525,9 @@ def main():
             time.sleep(60)
 
     finally:
-        pwm.stop()
-        GPIO.cleanup()
+        if pwm is not None:
+            pwm.stop()
+            GPIO.cleanup()
         log_error("[System] PWM stopped and GPIO cleaned up")
 
 

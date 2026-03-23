@@ -83,7 +83,7 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1)
 
 # ------------------ Configuration ------------------ #
-DB_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_DIR = "/data"
 DB_PATH = os.path.join(DB_DIR, "vedirect.db")
 POST_SECRET = os.environ.get("POST_SECRET")
 SERVER_LOG = os.path.join(DB_DIR, "server.log")
