@@ -67,6 +67,7 @@ import logging
 import sqlite3
 import shutil
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from collections import defaultdict
 from flask import Flask, request, jsonify
 from flask_limiter import Limiter
@@ -92,6 +93,7 @@ FERNET_KEY = os.environ.get("FERNET_KEY")
 fernet = Fernet(FERNET_KEY.encode()) if FERNET_KEY else None
 MAX_DAYS = 60
 _last_cleanup = 0
+MT = ZoneInfo("America/Denver")
 
 # ------------------ Rate Limiting ------------------ #
 limiter = Limiter(key_func=get_remote_address)
@@ -242,8 +244,7 @@ def build_voltage_series(parsed):
     timestamps, values = [], []
     for ts, v, *_ in parsed:
         try:
-            dt = datetime.fromisoformat(ts)
-            timestamps.append(dt.strftime("%Y-%m-%d %H:%M"))
+            timestamps.append(fmt_mt(ts))
             values.append(round(v, 2) if v >= 11 else None)
         except Exception:
             continue
@@ -306,6 +307,13 @@ def soc_pill(soc):
 def ensure_utc(dt):
     """Assume UTC if datetime is naive (e.g. from SQLite)."""
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+def fmt_mt(iso_str, fmt="%Y-%m-%d %H:%M"):
+    """Convert an ISO timestamp string to Mountain Time for display."""
+    dt = datetime.fromisoformat(iso_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(MT).strftime(fmt)
 
 # ------------------ Routes ------------------ #
 @app.route("/log", methods=["POST"])
@@ -605,7 +613,7 @@ def index():
 
     # Voltage chart
     voltage_timestamps, voltage_values = build_voltage_series(parsed_chrono)
-    timestamps = [p[0] for p in reversed(parsed)]
+    timestamps = [fmt_mt(p[0]) for p in reversed(parsed)]
     powers = [p[3] for p in reversed(parsed)]
 
     # Pi health pills
@@ -1060,7 +1068,7 @@ def index():
     for ts, v, i, ppv, vpv, load, cs, err, h20, h21 in reversed(table_data):
         power = round(v * i, 2)
         html += f"""
-                <tr><td>{ts}</td><td>{v}</td><td>{i}</td><td>{power}</td>
+                <tr><td>{fmt_mt(ts)}</td><td>{v}</td><td>{i}</td><td>{power}</td>
                 <td>{vpv}</td><td>{load}</td><td>{cs}</td><td>{h20}</td><td>{h21}</td></tr>"""
 
     html += f"""
