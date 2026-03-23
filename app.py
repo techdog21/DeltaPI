@@ -530,7 +530,7 @@ def index():
         try:
             data = json.loads(row["data"])
             ts = data.get("timestamp", row["timestamp"])
-            ts_dt = datetime.fromisoformat(ts)
+            ts_dt = ensure_utc(datetime.fromisoformat(ts))
             if ts_dt < since:
                 continue
             v = clean_int(data.get("V", 0)) / 1000
