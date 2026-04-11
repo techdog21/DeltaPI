@@ -150,6 +150,7 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pi_status_timestamp ON pi_status (timestamp)")
 
 init_db()
 
@@ -180,17 +181,20 @@ def get_disk_status(path="/"):
 
 def cleanup_old_records():
     """
-    Deletes all log records older than 30 days from the logs table.
+    Deletes log records older than 30 days and pi_status records older than 7 days.
     Uses get_db() for connection management. Throttled to run once per 24 hours
     via the _last_cleanup module-level variable in the /log and /log/bulk routes.
     """
+    conn = get_db()
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
     cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
-    conn = get_db()
-    deleted = conn.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff_str,)).rowcount
+    deleted_logs = conn.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff_str,)).rowcount
+    status_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    status_cutoff_str = status_cutoff.strftime("%Y-%m-%d %H:%M:%S")
+    deleted_status = conn.execute("DELETE FROM pi_status WHERE timestamp < ?", (status_cutoff_str,)).rowcount
     conn.commit()
-    if deleted:
-        server_log("DB", f"Cleanup: removed {deleted} records older than 30 days", "info")
+    if deleted_logs or deleted_status:
+        server_log("DB", f"Cleanup: removed {deleted_logs} logs (>30d) and {deleted_status} pi_status (>7d)", "info")
 
 @app.teardown_appcontext
 def close_db(exception):
