@@ -59,7 +59,10 @@ if not POST_SECRET:
     raise SystemExit(1)
 # Ensure log directory exists
 UPLOAD_INTERVAL = 30     # 30s — upload every other loop cycle
-BASE_URL = "https://deltapi-k3bf.onrender.com"
+BASE_URL = os.environ.get("BASE_URL")
+if not BASE_URL:
+    print("[FATAL] BASE_URL environment variable is not set. Exiting.")
+    raise SystemExit(1)
 ARCHIVE_PATH = "/var/log/vedirect/solar_archive.jsonl"
 MAX_ARCHIVE_DAYS = 14
 

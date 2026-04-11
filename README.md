@@ -37,8 +37,9 @@ The Raspberry Pi Zero is powered via a 12V-to-5V step-down converter and connect
 |----------|-------|----------|---------|
 | `POST_SECRET` | Server + Pi | Yes | Bearer token for authenticating POST requests |
 | `FERNET_KEY` | Server only | Yes | Fernet encryption key for date range tokens |
+| `BASE_URL` | Pi only | No | Server URL (defaults to Render deployment URL) |
 
-Both variables are validated at startup. The server logs warnings if either is missing; the Pi exits immediately if `POST_SECRET` is not set.
+Both `POST_SECRET` and `FERNET_KEY` are validated at startup. The server logs warnings if either is missing; the Pi exits immediately if `POST_SECRET` is not set.
 
 ## Requirements
 
@@ -112,6 +113,10 @@ The logger controls a PWM fan on GPIO 18 based on CPU temperature:
 - 30-50C: linear ramp from 20% to 100% duty cycle
 - Above 50C: full speed
 - If temperature cannot be read, the fan holds its current speed
+
+## License
+
+MIT License -- see [LICENSE](LICENSE) for details.
 
 ## Author
 
