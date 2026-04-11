@@ -146,11 +146,16 @@ def init_db():
                 fan_speed TEXT,
                 pi_name TEXT DEFAULT 'unknown',
                 pi_os TEXT DEFAULT 'unknown',
-                pi_updates TEXT DEFAULT 'unknown'
+                pi_updates TEXT DEFAULT 'unknown',
+                controller TEXT DEFAULT 'unknown'
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pi_status_timestamp ON pi_status (timestamp)")
+        # Migrate: add controller column if missing
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(pi_status)").fetchall()]
+        if "controller" not in cols:
+            conn.execute("ALTER TABLE pi_status ADD COLUMN controller TEXT DEFAULT 'unknown'")
 
 init_db()
 
@@ -460,12 +465,13 @@ def pi_status():
             raise ValueError("Missing required status fields")
         conn = get_db()
         conn.execute(
-            """INSERT INTO pi_status (ip, timestamp, uptime, cpu_temp, disk, memory, ssid, wifi_signal, fan_speed, pi_name, pi_os, pi_updates)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO pi_status (ip, timestamp, uptime, cpu_temp, disk, memory, ssid, wifi_signal, fan_speed, pi_name, pi_os, pi_updates, controller)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (client_ip, datetime.now(timezone.utc).isoformat(), payload["uptime"], payload["cpu_temp"],
              payload["disk"], payload["memory"], payload["ssid"], payload["wifi_signal"],
              payload.get("fan_speed", "unknown"), payload.get("pi_name", "unknown"),
-             payload.get("pi_os", "unknown"), payload.get("pi_updates", "unknown"))
+             payload.get("pi_os", "unknown"), payload.get("pi_updates", "unknown"),
+             payload.get("controller", "unknown"))
         )
         conn.commit()
         return jsonify({"status": "ok"}), 200
@@ -536,11 +542,11 @@ def index():
     pi_status_row = None
     try:
         row = conn.execute(
-            "SELECT ip, timestamp, uptime, cpu_temp, disk, memory, ssid, wifi_signal, fan_speed, pi_name, pi_os, pi_updates FROM pi_status ORDER BY timestamp DESC LIMIT 1"
+            "SELECT ip, timestamp, uptime, cpu_temp, disk, memory, ssid, wifi_signal, fan_speed, pi_name, pi_os, pi_updates, controller FROM pi_status ORDER BY timestamp DESC LIMIT 1"
         ).fetchone()
         if row:
             pi_status_row = dict(zip(
-                ["ip", "timestamp", "uptime", "cpu_temp", "disk", "memory", "ssid", "wifi_signal", "fan_speed", "pi_name", "pi_os", "pi_updates"], row
+                ["ip", "timestamp", "uptime", "cpu_temp", "disk", "memory", "ssid", "wifi_signal", "fan_speed", "pi_name", "pi_os", "pi_updates", "controller"], row
             ))
     except Exception as e:
         server_log("GET", f"Failed to fetch Pi status: {e}", "warning")
@@ -690,6 +696,14 @@ def index():
         ])
     except Exception:
         updates_class, updates_label = "gray", "Unknown"
+
+    controller_val = pi_status_row.get("controller", "unknown")
+    if controller_val == "Connected":
+        controller_class, controller_label = "green", "Connected"
+    elif controller_val == "unknown":
+        controller_class, controller_label = "gray", "Unknown"
+    else:
+        controller_class, controller_label = "red", "No Controller"
 
     # Charging state
     if parsed:
@@ -1021,6 +1035,14 @@ def index():
         </form>
         <button class="theme-toggle" onclick="toggleTheme()">Light/Dark</button>
         <button class="theme-toggle" onclick="location.reload()">Refresh</button>
+        <select id="autoRefresh" class="theme-toggle" onchange="setAutoRefresh(this.value)" style="padding:4px 6px;">
+            <option value="0">Auto: Off</option>
+            <option value="15">15s</option>
+            <option value="30">30s</option>
+            <option value="60">1m</option>
+            <option value="120">2m</option>
+            <option value="300">5m</option>
+        </select>
     </div>
 </div>
 
@@ -1044,6 +1066,7 @@ def index():
     if pi_status_row:
         html += f"""
         <h2>Pi Health — {pi_status_row['pi_name'].upper()}</h2>
+        <div class="metric"><span class="metric-label">Controller</span><span class="metric-value"><span class="pill {controller_class}">{controller_label}</span></span></div>
         <div class="metric"><span class="metric-label">OS</span><span class="metric-value">{pi_status_row.get('pi_os')}</span></div>
         <div class="metric"><span class="metric-label">Uptime</span><span class="metric-value">{pi_status_row['uptime']}</span></div>
         <div class="metric"><span class="metric-label">Last Check-in</span><span class="metric-value"><span class="pill {checkin_class}">{checkin_label}</span></span></div>
@@ -1123,9 +1146,24 @@ function toggleTheme() {{
     var next = current === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
     document.cookie = 'theme=' + next + ';path=/;max-age=31536000';
-    // Rebuild charts with new colors
     location.reload();
 }}
+
+var _refreshTimer = null;
+function setAutoRefresh(seconds) {{
+    if (_refreshTimer) clearInterval(_refreshTimer);
+    _refreshTimer = null;
+    localStorage.setItem('autoRefresh', seconds);
+    if (seconds > 0) {{
+        _refreshTimer = setInterval(function() {{ location.reload(); }}, seconds * 1000);
+    }}
+}}
+(function() {{
+    var saved = localStorage.getItem('autoRefresh') || '0';
+    var sel = document.getElementById('autoRefresh');
+    if (sel) sel.value = saved;
+    if (parseInt(saved) > 0) setAutoRefresh(parseInt(saved));
+}})();
 
 // Read CSS variable values for chart colors
 var style = getComputedStyle(document.documentElement);

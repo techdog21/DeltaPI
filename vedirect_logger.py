@@ -58,7 +58,7 @@ if not POST_SECRET:
     print("[FATAL] POST_SECRET environment variable is not set. Exiting.")
     raise SystemExit(1)
 # Ensure log directory exists
-UPLOAD_INTERVAL = 120    # 2 min — near real-time
+UPLOAD_INTERVAL = 30     # 30s — upload every other loop cycle
 BASE_URL = "https://deltapi-k3bf.onrender.com"
 ARCHIVE_PATH = "/var/log/vedirect/solar_archive.jsonl"
 MAX_ARCHIVE_DAYS = 14
@@ -149,13 +149,19 @@ def read_frame(ser):
         ser (Serial): The open serial connection.
 
     Returns:
-        dict: Parsed key-value pairs from the frame.
+        dict or None: Parsed key-value pairs from the frame,
+                      or None if no complete frame received.
     """
     frame = {}
+    empty_count = 0
     while True:
         line = ser.readline().decode('utf-8', errors='ignore').strip()
         if not line:
+            empty_count += 1
+            if empty_count >= 5:
+                return None
             continue
+        empty_count = 0
         if line.startswith("Checksum"):
             return frame
         parts = line.split(None, 1)
@@ -339,13 +345,14 @@ def archive_sent_logs():
         log_error(f"[Archive] Failed: {e}")
 
 
-def send_pi_status(current_duty, fan_available=True):
+def send_pi_status(current_duty, fan_available=True, serial_connected=False):
     """
     Send the Raspberry Pi's system status and fan speed to the remote server.
 
     Args:
         current_duty (int): Current fan duty cycle (%).
         fan_available (bool): Whether the fan is available.
+        serial_connected (bool): Whether the VE.Direct serial connection is active.
     """
     if not network_ready():
         log_error("[Network] Offline: Skipping Pi status POST")
@@ -404,7 +411,8 @@ def send_pi_status(current_duty, fan_available=True):
         "fan_speed": f"{current_duty}%" if fan_available else "N/A",
         "pi_name": hostname,
         "pi_os": os_version,
-        "pi_updates": updates
+        "pi_updates": updates,
+        "controller": "Connected" if serial_connected else "No controller detected"
     }
 
     try:
@@ -486,46 +494,65 @@ def main():
     log_error("[System] Starting vedirect_logger")
     pwm, current_duty = setup_fan()
 
+    SERIAL_RETRY_INTERVAL = 60  # seconds between reconnect attempts
     try:
         ser = None
-        while ser is None:
-            try:
-                ser = serial.Serial('/dev/ttyUSB0', 19200, timeout=5)
-                log_error("[Serial] Connected to /dev/ttyUSB0")
-            except Exception as e:
-                log_error(f"[Serial] Open failed: {e}")
-                time.sleep(30)
+        try:
+            ser = serial.Serial('/dev/ttyUSB0', 19200, timeout=5)
+            log_error("[Serial] Connected to /dev/ttyUSB0")
+        except Exception as e:
+            log_error(f"[Serial] Not available, running without controller: {e}")
 
+        fan_available = pwm is not None
         upload_unsent_logs()
         backfill_from_archive()
-        fan_available = pwm is not None
+        send_pi_status(current_duty, fan_available, serial_connected=(ser is not None))
+        log_error("[System] Startup complete — initial status posted")
         last_prune_check = time.time()
-        last_status_time = 0
+        last_status_time = time.time()
+        last_serial_retry = time.time()
 
         while True:
             try:
-                frame = read_frame(ser)
-                if frame:
-                    frame["timestamp"] = datetime.now(timezone.utc).isoformat()
+                # Retry serial connection periodically if not connected
+                if ser is None and time.time() - last_serial_retry > SERIAL_RETRY_INTERVAL:
+                    last_serial_retry = time.time()
                     try:
-                        with open(LOG_PATH, "a") as f:
-                            json.dump(frame, f)
-                            f.write("\n")
-                        log_error(f"[Log] Frame written locally at {frame['timestamp']}")
-                    except Exception as e:
-                        log_error(f"[Log] Local write failed: {e}")
+                        ser = serial.Serial('/dev/ttyUSB0', 19200, timeout=5)
+                        log_error("[Serial] Reconnected to /dev/ttyUSB0")
+                    except Exception:
+                        pass  # stay in no-controller mode
+
+                if ser is not None:
+                    frame = read_frame(ser)
+                    if frame:
+                        frame["timestamp"] = datetime.now(timezone.utc).isoformat()
+                        try:
+                            with open(LOG_PATH, "a") as f:
+                                json.dump(frame, f)
+                                f.write("\n")
+                            log_error(f"[Log] Frame written locally at {frame['timestamp']}")
+                        except Exception as e:
+                            log_error(f"[Log] Local write failed: {e}")
 
                 if time.time() - last_prune_check > UPLOAD_INTERVAL:
                     upload_unsent_logs()
                     last_prune_check = time.time()
 
                 if time.time() - last_status_time > UPLOAD_INTERVAL:
-                    send_pi_status(current_duty, fan_available)
+                    send_pi_status(current_duty, fan_available, serial_connected=(ser is not None))
                     last_status_time = time.time()
 
                 temp = get_pi_temp()
                 current_duty = update_fan(pwm, temp, current_duty)
 
+            except serial.SerialException as e:
+                log_error(f"[Serial] Lost connection: {e}")
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+                ser = None
             except Exception as e:
                 log_error(f"[Loop] Error: {e}")
 
