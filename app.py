@@ -61,11 +61,13 @@ The Pi buffers data locally and uploads periodically based on trip/dormant mode.
 
 # ------------------ Imports ------------------ #
 import os
+import sys
 import time as time_module
 import json
 import logging
 import sqlite3
 import shutil
+import threading
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from collections import defaultdict
@@ -75,7 +77,7 @@ from flask_limiter.util import get_remote_address
 from cryptography.fernet import Fernet
 from werkzeug.middleware.proxy_fix import ProxyFix
 from dateutil.parser import parse as parse_date
-from flask import has_request_context, request
+from flask import has_request_context
 
 # ------------------ App Setup ------------------ #
 app = Flask(__name__)
@@ -85,13 +87,18 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1)
 DB_DIR = "/data"
 DB_PATH = os.path.join(DB_DIR, "vedirect.db")
 POST_SECRET = os.environ.get("POST_SECRET")
+if not POST_SECRET:
+    logging.warning("POST_SECRET is not set — all authenticated routes will reject requests")
 SERVER_LOG = os.path.join(DB_DIR, "server.log")
 os.makedirs(DB_DIR, exist_ok=True)
 
 FERNET_KEY = os.environ.get("FERNET_KEY")
+if not FERNET_KEY:
+    logging.warning("FERNET_KEY is not set — /encrypt_days will be unavailable")
 fernet = Fernet(FERNET_KEY.encode()) if FERNET_KEY else None
 MAX_DAYS = 60
 _last_cleanup = 0
+_cleanup_lock = threading.Lock()
 MT = ZoneInfo("America/Denver")
 
 # ------------------ Rate Limiting ------------------ #
@@ -153,7 +160,7 @@ def get_db():
     by close_db() at end of request.
     """
     if 'db' not in g:
-        g.db = sqlite3.connect(DB_PATH)
+        g.db = sqlite3.connect(DB_PATH, check_same_thread=False)
         g.db.row_factory = sqlite3.Row
     return g.db
 
@@ -196,14 +203,6 @@ def close_db(exception):
         db.close()
 
 # ------------------ Helpers ------------------ #
-def build_mode_datasets(modes, daily_mode_totals, days, blue_shades):
-    """Constructs Chart.js-compatible datasets for a stacked bar chart of solar charge modes."""
-    datasets = []
-    for idx, mode in enumerate(modes):
-        data = [round(daily_mode_totals[day].get(mode, 0) / 60, 1) for day in days]
-        datasets.append({"label": mode, "data": data, "backgroundColor": blue_shades[idx % len(blue_shades)]})
-    return datasets
-
 def clean_int(value):
     """
     Safely converts a value to an integer, stripping null bytes and whitespace.
@@ -344,9 +343,10 @@ def log():
         conn.execute("INSERT INTO logs (timestamp, received, data) VALUES (?, ?, ?)", (timestamp, received, data_str))
         conn.commit()
         global _last_cleanup
-        if time_module.time() - _last_cleanup > 86400:
-            cleanup_old_records()
-            _last_cleanup = time_module.time()
+        with _cleanup_lock:
+            if time_module.time() - _last_cleanup > 86400:
+                cleanup_old_records()
+                _last_cleanup = time_module.time()
         server_log("POST", f"Accepted data from {client_ip}", "info")
         return jsonify({"status": "ok"}), 200
     except Exception as e:
@@ -380,9 +380,12 @@ def bulk_log():
     try:
         conn = get_db()
         timestamps_to_check = [e.get("timestamp") for e in entries if "timestamp" in e]
-        placeholders = ",".join("?" for _ in timestamps_to_check)
         if timestamps_to_check:
-            existing_ts = set(row[0] for row in conn.execute(f"SELECT timestamp FROM logs WHERE timestamp IN ({placeholders})", timestamps_to_check))
+            placeholders = ",".join("?" for _ in timestamps_to_check)
+            existing_ts = set(row[0] for row in conn.execute(
+                "SELECT timestamp FROM logs WHERE timestamp IN ({})".format(placeholders),
+                timestamps_to_check
+            ))
         else:
             existing_ts = set()
         inserted = 0
@@ -396,9 +399,10 @@ def bulk_log():
             inserted += 1
         conn.commit()
         global _last_cleanup
-        if time_module.time() - _last_cleanup > 86400:
-            cleanup_old_records()
-            _last_cleanup = time_module.time()
+        with _cleanup_lock:
+            if time_module.time() - _last_cleanup > 86400:
+                cleanup_old_records()
+                _last_cleanup = time_module.time()
         server_log("POST", f"Bulk insert from {client_ip}: {inserted} new entries", "info")
         return jsonify({"status": "ok", "inserted": inserted}), 200
     except Exception as e:
@@ -413,6 +417,9 @@ def encrypt_days():
     Used by the dashboard's date range selector to prevent tampering with query parameters.
     """
     try:
+        if not fernet:
+            server_log("GET", "FERNET_KEY not configured", "error")
+            return jsonify({"error": "Encryption unavailable"}), 503
         if not request.is_secure:
             server_log("GET", f"Insecure request rejected from {request.remote_addr}", "warning")
             return jsonify({"error": "HTTPS required"}), 403
@@ -507,7 +514,17 @@ def index():
         if delta.total_seconds() < 600:
             status_color, status_text = "green", "Receiving data"
         else:
-            status_color, status_text = "red", f"No data in {int(delta.total_seconds() // 60)} min"
+            total_min = int(delta.total_seconds() // 60)
+            if total_min >= 1440:
+                d, remaining = divmod(total_min, 1440)
+                h = remaining // 60
+                age_str = f"{d}d {h}h" if h else f"{d}d"
+            elif total_min >= 60:
+                h, m = divmod(total_min, 60)
+                age_str = f"{h}h {m}m" if m else f"{h}h"
+            else:
+                age_str = f"{total_min} min"
+            status_color, status_text = "red", f"No data in {age_str}"
     else:
         status_color, status_text = "red", "No data available"
 
@@ -624,7 +641,16 @@ def index():
         checkin_class, checkin_label = make_status_pill(checkin_age_min, [
             (15, ("green", "recent")), (30, ("yellow", "moderate")), (float('inf'), ("red", "stale"))
         ])
-        checkin_label = f"{int(checkin_age_min)} min ago"
+        total_min = int(checkin_age_min)
+        if total_min >= 1440:
+            d, remaining = divmod(total_min, 1440)
+            h = remaining // 60
+            checkin_label = f"{d}d {h}h ago" if h else f"{d}d ago"
+        elif total_min >= 60:
+            h, m = divmod(total_min, 60)
+            checkin_label = f"{h}h {m}m ago" if m else f"{h}h ago"
+        else:
+            checkin_label = f"{total_min} min ago"
     except Exception:
         checkin_class, checkin_label = "gray", "Unknown"
 

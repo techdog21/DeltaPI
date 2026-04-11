@@ -39,7 +39,7 @@ import time
 import requests
 import subprocess
 import socket
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import RPi.GPIO as GPIO
 
 #  ------------------ Configuration ------------------ #
@@ -54,6 +54,9 @@ LOG_PATH = "/var/log/vedirect/solar_log.jsonl"
 ERROR_LOG = "/var/log/vedirect/vedirect_error.log"
 OFFSET_FILE = "/var/log/vedirect/sent_offset.txt"
 POST_SECRET = os.environ.get("POST_SECRET")
+if not POST_SECRET:
+    print("[FATAL] POST_SECRET environment variable is not set. Exiting.")
+    raise SystemExit(1)
 # Ensure log directory exists
 UPLOAD_INTERVAL = 120    # 2 min — near real-time
 BASE_URL = "https://deltapi-k3bf.onrender.com"
@@ -69,7 +72,7 @@ def log_error(message):
         message (str): The message to log.
     """
     with open(ERROR_LOG, "a") as f:
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
         f.write(f"[{timestamp}] {message}\n")
 
 
@@ -110,10 +113,11 @@ def setup_fan():
 def update_fan(pwm, temp, current_duty):
     """
     Adjust fan speed for quiet operation targeting 40°C.
-    Fan is completely off below OFF_TEMP.
+    Fan is completely off below OFF_TEMP. If temp is None (read failed),
+    holds the current duty cycle unchanged.
     """
-    if pwm is None:
-        return 0
+    if pwm is None or temp is None:
+        return current_duty
     if temp <= OFF_TEMP:
         new_duty = 0  # Fan fully off
     elif temp >= ON_TEMP:
@@ -166,14 +170,14 @@ def get_pi_temp():
     Get the current CPU temperature of the Raspberry Pi.
 
     Returns:
-        float: CPU temperature in °C, or 0.0 if unavailable.
+        float or None: CPU temperature in °C, or None if unavailable.
     """
     try:
         result = subprocess.check_output(["vcgencmd", "measure_temp"]).decode()
         temp_str = result.strip().split("=")[1].split("'")[0]
         return float(temp_str)
     except Exception:
-        return 0.0
+        return None
 
 
 def bulk_upload(entries):
@@ -297,10 +301,6 @@ def get_wifi_signal_strength():
         log_error(f"[WiFi] Signal fetch error: {e}")
     return "unknown"
 
-def get_upload_interval():
-    """Return upload interval."""
-    return UPLOAD_INTERVAL
-
 def archive_sent_logs():
     """Copy sent entries to archive before pruning, keeping 14 days max."""
     try:
@@ -313,16 +313,22 @@ def archive_sent_logs():
         with open(ARCHIVE_PATH, "a") as f:
             f.write(sent_data)
 
-        cutoff = datetime.utcnow() - timedelta(days=MAX_ARCHIVE_DAYS)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_ARCHIVE_DAYS)
         kept = []
         with open(ARCHIVE_PATH, "r") as f:
             for line in f:
                 try:
                     entry = json.loads(line)
-                    ts = datetime.fromisoformat(entry.get("timestamp", ""))
+                    ts_str = entry.get("timestamp")
+                    if not ts_str:
+                        continue
+                    ts = datetime.fromisoformat(ts_str)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
                     if ts >= cutoff:
                         kept.append(line)
-                except Exception:
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    log_error(f"[Archive] Skipping malformed entry: {line.strip()[:80]}")
                     continue
 
         with open(ARCHIVE_PATH, "w") as f:
@@ -346,6 +352,7 @@ def send_pi_status(current_duty, fan_available=True):
         return
 
     def safe(cmd, parse):
+        """Run a shell command and parse its output, returning 'unknown' on any failure."""
         try:
             return parse(subprocess.check_output(cmd).decode())
         except Exception:
@@ -360,9 +367,15 @@ def send_pi_status(current_duty, fan_available=True):
     # Get disk usage
     disk = safe(["df", "-h", "/"], lambda x: f"{x.splitlines()[1].split()[2]}/{x.splitlines()[1].split()[1]} ({x.splitlines()[1].split()[4]})")
     # Get memory usage
-    memory = safe(["free", "-m"], lambda x: (
-        lambda row: f"{row[2]}/{row[1]} ({int(int(''.join(filter(str.isdigit, row[2])))/int(''.join(filter(str.isdigit, row[1])))*100)}%)"
-    )(x.splitlines()[1].split()))
+    def parse_memory(output):
+        """Parse 'free -m' output into 'used/total (percent%)' format."""
+        row = output.splitlines()[1].split()
+        total = int(row[1])
+        used = int(row[2])
+        if total == 0:
+            return "0/0 (0%)"
+        return f"{used}/{total} ({int(used / total * 100)}%)"
+    memory = safe(["free", "-m"], parse_memory)
     # Get Wi-Fi SSID
     #ssid = safe(["iwgetid", "-r"], lambda x: x.strip() or "not connected")
     ssid = safe(["iwgetid", "-r"], lambda x: x.strip() or "not connected") + \
@@ -493,7 +506,7 @@ def main():
             try:
                 frame = read_frame(ser)
                 if frame:
-                    frame["timestamp"] = datetime.utcnow().isoformat()
+                    frame["timestamp"] = datetime.now(timezone.utc).isoformat()
                     try:
                         with open(LOG_PATH, "a") as f:
                             json.dump(frame, f)
@@ -502,13 +515,11 @@ def main():
                     except Exception as e:
                         log_error(f"[Log] Local write failed: {e}")
 
-                interval = get_upload_interval()
-
-                if time.time() - last_prune_check > interval:
+                if time.time() - last_prune_check > UPLOAD_INTERVAL:
                     upload_unsent_logs()
                     last_prune_check = time.time()
 
-                if time.time() - last_status_time > interval:
+                if time.time() - last_status_time > UPLOAD_INTERVAL:
                     send_pi_status(current_duty, fan_available)
                     last_status_time = time.time()
 
@@ -521,6 +532,12 @@ def main():
             time.sleep(15)
 
     finally:
+        if ser is not None:
+            try:
+                ser.close()
+                log_error("[Serial] Connection closed")
+            except Exception:
+                pass
         if pwm is not None:
             pwm.stop()
             GPIO.cleanup()
