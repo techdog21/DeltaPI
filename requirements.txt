@@ -1,6 +1,7 @@
-flask
-gunicorn
-cryptography
-flask-limiter
-requests
-python-dateutil
+flask>=3.0,<4
+gunicorn>=21.2,<24
+cryptography>=42.0
+flask-limiter>=3.5,<4
+requests>=2.31
+python-dateutil>=2.8
+markupsafe>=2.1

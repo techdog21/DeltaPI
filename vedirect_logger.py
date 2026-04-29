@@ -13,8 +13,7 @@ It also manages Raspberry Pi system health monitoring, including:
 
 Features:
 - Local JSONL logging with automatic pruning of uploaded entries
-- Bulk upload of VE.Direct data to a remote API (10 min active, 30 min dormant)
--- reduce off grid data usage and ensure reliable delivery
+- Bulk upload of VE.Direct data to a remote API every UPLOAD_INTERVAL seconds
 - Periodic system health POSTs to `/status` endpoint
 - PWM fan speed control targeting efficient and quiet cooling
 - Designed for off-grid solar/RV monitoring setups
@@ -246,7 +245,11 @@ def update_last_sent_offset(offset):
 
 
 def prune_sent_logs():
-    """Remove already-uploaded entries from the log file using atomic swap."""
+    """Remove already-uploaded entries from the log file using atomic swap.
+
+    Note: this assumes a single-threaded writer. Lines appended to LOG_PATH
+    between the read and the os.replace would be lost.
+    """
     try:
         offset = get_last_sent_offset()
         if offset <= 0:
@@ -436,11 +439,6 @@ def backfill_from_archive():
     """If server has no data, replay local archive to repopulate after a redeploy."""
     if not network_ready():
         return
-    try:
-        resp = requests.get(BASE_URL + "/log/bulk", timeout=5)
-        # Server returns 405 for GET on POST-only route = server is up
-    except Exception:
-        return
 
     try:
         entries = []
@@ -459,11 +457,12 @@ def backfill_from_archive():
             log_error("[Backfill] Archive empty")
             return
 
-        # Ask server how many records it has
+        # Probe server with a single entry; dedup means a non-zero "inserted"
+        # count tells us the server has no record of this timestamp yet.
         headers = {"Authorization": f"Bearer {POST_SECRET}"}
         resp = requests.post(
             BASE_URL + "/log/bulk",
-            json=entries[:1],  # Send 1 entry to test; dedup will skip if exists
+            json=entries[:1],
             headers=headers,
             timeout=10
         )

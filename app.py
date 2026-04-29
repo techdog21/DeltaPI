@@ -62,6 +62,7 @@ The Pi buffers data locally and uploads periodically based on trip/dormant mode.
 # ------------------ Imports ------------------ #
 import os
 import sys
+import hmac
 import time as time_module
 import json
 import logging
@@ -78,13 +79,15 @@ from cryptography.fernet import Fernet
 from werkzeug.middleware.proxy_fix import ProxyFix
 from dateutil.parser import parse as parse_date
 from flask import has_request_context
+from markupsafe import escape
 
 # ------------------ App Setup ------------------ #
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1)
+app.config["MAX_CONTENT_LENGTH"] = 1_000_000  # reject request bodies larger than 1 MB
 
 # ------------------ Configuration ------------------ #
-DB_DIR = "/data"
+DB_DIR = os.environ.get("DB_DIR", "/data")
 DB_PATH = os.path.join(DB_DIR, "vedirect.db")
 POST_SECRET = os.environ.get("POST_SECRET")
 if not POST_SECRET:
@@ -96,7 +99,7 @@ FERNET_KEY = os.environ.get("FERNET_KEY")
 if not FERNET_KEY:
     logging.warning("FERNET_KEY is not set — /encrypt_days will be unavailable")
 fernet = Fernet(FERNET_KEY.encode()) if FERNET_KEY else None
-MAX_DAYS = 60
+MAX_DAYS = 30  # matches the 30-day retention enforced by cleanup_old_records
 _last_cleanup = 0
 _cleanup_lock = threading.Lock()
 MT = ZoneInfo("America/Denver")
@@ -152,10 +155,11 @@ def init_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pi_status_timestamp ON pi_status (timestamp)")
-        # Migrate: add controller column if missing
-        cols = [row[1] for row in conn.execute("PRAGMA table_info(pi_status)").fetchall()]
-        if "controller" not in cols:
-            conn.execute("ALTER TABLE pi_status ADD COLUMN controller TEXT DEFAULT 'unknown'")
+        # Migrate: add any missing optional columns to pi_status
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(pi_status)").fetchall()}
+        for col in ("pi_name", "pi_os", "pi_updates", "controller"):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE pi_status ADD COLUMN {col} TEXT DEFAULT 'unknown'")
 
 init_db()
 
@@ -191,12 +195,12 @@ def cleanup_old_records():
     via the _last_cleanup module-level variable in the /log and /log/bulk routes.
     """
     conn = get_db()
-    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
-    cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
-    deleted_logs = conn.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff_str,)).rowcount
-    status_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-    status_cutoff_str = status_cutoff.strftime("%Y-%m-%d %H:%M:%S")
-    deleted_status = conn.execute("DELETE FROM pi_status WHERE timestamp < ?", (status_cutoff_str,)).rowcount
+    # Timestamps are stored as ISO-8601 (e.g. 2026-04-29T12:34:56.789012+00:00),
+    # so the cutoff must use the same format for lexicographic comparison to work.
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    deleted_logs = conn.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff,)).rowcount
+    status_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    deleted_status = conn.execute("DELETE FROM pi_status WHERE timestamp < ?", (status_cutoff,)).rowcount
     conn.commit()
     if deleted_logs or deleted_status:
         server_log("DB", f"Cleanup: removed {deleted_logs} logs (>30d) and {deleted_status} pi_status (>7d)", "info")
@@ -212,6 +216,29 @@ def close_db(exception):
         db.close()
 
 # ------------------ Helpers ------------------ #
+def is_authorized():
+    """
+    Constant-time bearer-token check for authenticated POST routes.
+    Returns False if POST_SECRET is not configured.
+    """
+    if not POST_SECRET:
+        return False
+    expected = f"Bearer {POST_SECRET}"
+    provided = request.headers.get("Authorization", "")
+    return hmac.compare_digest(provided, expected)
+
+def humanize_minutes(minutes):
+    """Format a minute count as 'N min', 'Hh Mm', or 'Dd Hh' (no 'ago' suffix)."""
+    total = int(minutes)
+    if total >= 1440:
+        d, remaining = divmod(total, 1440)
+        h = remaining // 60
+        return f"{d}d {h}h" if h else f"{d}d"
+    if total >= 60:
+        h, m = divmod(total, 60)
+        return f"{h}h {m}m" if m else f"{h}h"
+    return f"{total} min"
+
 def clean_int(value):
     """
     Safely converts a value to an integer, stripping null bytes and whitespace.
@@ -335,7 +362,7 @@ def log():
     if not request.is_secure:
         server_log("POST", f"Insecure request rejected from {client_ip}", "warning")
         return jsonify({"error": "HTTPS required"}), 403
-    if request.headers.get("Authorization", "") != f"Bearer {POST_SECRET}":
+    if not is_authorized():
         server_log("POST", f"Rejected: Bad Auth from {client_ip}", "warning")
         return jsonify({"error": "Unauthorized"}), 403
     entry = request.get_json()
@@ -375,8 +402,7 @@ def bulk_log():
     if not request.is_secure:
         server_log("POST", f"Insecure bulk request from {client_ip}", "warning")
         return jsonify({"error": "HTTPS required"}), 403
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header != f"Bearer {POST_SECRET}":
+    if not is_authorized():
         server_log("POST", f"Rejected bulk request: Bad Auth from {client_ip}", "warning")
         return jsonify({"error": "Unauthorized"}), 403
     try:
@@ -455,7 +481,7 @@ def pi_status():
     if not request.is_secure:
         server_log("POST", f"Insecure status update rejected from {client_ip}", "warning")
         return jsonify({"error": "HTTPS required"}), 403
-    if request.headers.get("Authorization", "") != f"Bearer {POST_SECRET}":
+    if not is_authorized():
         server_log("POST", f"Rejected: Bad Auth for /status from {client_ip}", "warning")
         return jsonify({"error": "Unauthorized"}), 403
     try:
@@ -524,16 +550,7 @@ def index():
         if delta.total_seconds() < 600:
             status_color, status_text = "green", "Receiving data"
         else:
-            total_min = int(delta.total_seconds() // 60)
-            if total_min >= 1440:
-                d, remaining = divmod(total_min, 1440)
-                h = remaining // 60
-                age_str = f"{d}d {h}h" if h else f"{d}d"
-            elif total_min >= 60:
-                h, m = divmod(total_min, 60)
-                age_str = f"{h}h {m}m" if m else f"{h}h"
-            else:
-                age_str = f"{total_min} min"
+            age_str = humanize_minutes(delta.total_seconds() / 60)
             status_color, status_text = "red", f"No data in {age_str}"
     else:
         status_color, status_text = "red", "No data available"
@@ -651,16 +668,7 @@ def index():
         checkin_class, checkin_label = make_status_pill(checkin_age_min, [
             (15, ("green", "recent")), (30, ("yellow", "moderate")), (float('inf'), ("red", "stale"))
         ])
-        total_min = int(checkin_age_min)
-        if total_min >= 1440:
-            d, remaining = divmod(total_min, 1440)
-            h = remaining // 60
-            checkin_label = f"{d}d {h}h ago" if h else f"{d}d ago"
-        elif total_min >= 60:
-            h, m = divmod(total_min, 60)
-            checkin_label = f"{h}h {m}m ago" if m else f"{h}h ago"
-        else:
-            checkin_label = f"{total_min} min ago"
+        checkin_label = f"{humanize_minutes(checkin_age_min)} ago"
     except Exception:
         checkin_class, checkin_label = "gray", "Unknown"
 
@@ -1064,16 +1072,28 @@ def index():
     <div class="panel">"""
 
     if pi_status_row:
+        # Escape every Pi-reported field; the Pi controls these strings, so a
+        # crafted /status payload could otherwise inject HTML/JS into the page.
+        pi_name = escape((pi_status_row.get('pi_name') or '?').upper())
+        pi_os_val = escape(pi_status_row.get('pi_os') or '?')
+        pi_uptime = escape(pi_status_row.get('uptime') or '?')
+        pi_cpu_temp = escape(pi_status_row.get('cpu_temp') or '?')
+        pi_fan_speed = escape(pi_status_row.get('fan_speed') or '?')
+        pi_updates_val = escape(pi_status_row.get('pi_updates') or '?')
+        pi_memory = escape(pi_status_row.get('memory') or '?')
+        pi_disk = escape(pi_status_row.get('disk') or '?')
+        pi_ssid = escape(pi_status_row.get('ssid') or '?')
+        pi_wifi_signal = escape(pi_status_row.get('wifi_signal') or '?')
         html += f"""
-        <h2>Pi Health — {pi_status_row['pi_name'].upper()}</h2>
+        <h2>Pi Health — {pi_name}</h2>
         <div class="metric"><span class="metric-label">Controller</span><span class="metric-value"><span class="pill {controller_class}">{controller_label}</span></span></div>
-        <div class="metric"><span class="metric-label">OS</span><span class="metric-value">{pi_status_row.get('pi_os')}</span></div>
-        <div class="metric"><span class="metric-label">Uptime</span><span class="metric-value">{pi_status_row['uptime']}</span></div>
+        <div class="metric"><span class="metric-label">OS</span><span class="metric-value">{pi_os_val}</span></div>
+        <div class="metric"><span class="metric-label">Uptime</span><span class="metric-value">{pi_uptime}</span></div>
         <div class="metric"><span class="metric-label">Last Check-in</span><span class="metric-value"><span class="pill {checkin_class}">{checkin_label}</span></span></div>
-        <div class="metric"><span class="metric-label">CPU / Fan</span><span class="metric-value">{pi_status_row['cpu_temp']} <span class="pill {temp_class}">{temp_label}</span> {pi_status_row.get("fan_speed", "?")} <span class="pill {fan_class}">{fan_label}</span></span></div>
-        <div class="metric"><span class="metric-label">Updates</span><span class="metric-value">{pi_status_row.get('pi_updates')} <span class="pill {updates_class}">{updates_label}</span></span></div>
-        <div class="metric"><span class="metric-label">Mem / Disk</span><span class="metric-value">{pi_status_row['memory']} / {pi_status_row['disk']}</span></div>
-        <div class="metric"><span class="metric-label">Wi-Fi</span><span class="metric-value">{pi_status_row.get("ssid", "?")} {pi_status_row.get("wifi_signal", "?")} <span class="pill {wifi_class}">{wifi_label}</span></span></div>
+        <div class="metric"><span class="metric-label">CPU / Fan</span><span class="metric-value">{pi_cpu_temp} <span class="pill {temp_class}">{temp_label}</span> {pi_fan_speed} <span class="pill {fan_class}">{fan_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Updates</span><span class="metric-value">{pi_updates_val} <span class="pill {updates_class}">{updates_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Mem / Disk</span><span class="metric-value">{pi_memory} / {pi_disk}</span></div>
+        <div class="metric"><span class="metric-label">Wi-Fi</span><span class="metric-value">{pi_ssid} {pi_wifi_signal} <span class="pill {wifi_class}">{wifi_label}</span></span></div>
         <div class="metric"><span class="metric-label">Container</span><span class="metric-value">{data_percent}% <span class="pill {data_class}">{data_label}</span> — {existing_days}d avail</span></div>"""
     else:
         html += """
@@ -1119,9 +1139,10 @@ def index():
 
     for ts, v, i, ppv, vpv, load, cs, err, h20, h21 in reversed(table_data):
         power = round(v * i, 2)
+        # load/cs originate from VE.Direct payloads (user-controlled via /log) — escape.
         html += f"""
                 <tr><td>{fmt_mt(ts)}</td><td>{v}</td><td>{i}</td><td>{power}</td>
-                <td>{vpv}</td><td>{load}</td><td>{cs}</td><td>{h20}</td><td>{h21}</td></tr>"""
+                <td>{vpv}</td><td>{escape(load)}</td><td>{escape(cs)}</td><td>{h20}</td><td>{h21}</td></tr>"""
 
     html += f"""
             </tbody>
