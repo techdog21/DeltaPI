@@ -36,6 +36,7 @@ STATE_DIR = os.environ.get("BATT_STATE_DIR", "/var/log/vedirect")
 STATE_PATH = os.path.join(STATE_DIR, "battery_state.json")
 POLL_INTERVAL = int(os.environ.get("BATT_POLL_INTERVAL", "60"))  # seconds between cycles
 PER_BATT_TIMEOUT = int(os.environ.get("BATT_READ_TIMEOUT", "40"))  # per-battery read budget
+READ_ATTEMPTS = int(os.environ.get("BATT_READ_ATTEMPTS", "3"))  # retries if a BLE scan misses a battery
 ADAPTER = os.environ.get("BATT_ADAPTER", "hci0")
 
 # (label, MAC, BLE alias). Alias must match the advertised name.
@@ -118,7 +119,15 @@ def summarize(label, mac, raw):
 def poll_once():
     batteries = []
     for label, mac, alias in BATTERIES:
-        raw = read_battery(mac, alias)
+        raw = None
+        for attempt in range(1, READ_ATTEMPTS + 1):
+            raw = read_battery(mac, alias)
+            if raw:
+                break
+            # a single 5s BLE scan occasionally misses a battery; re-scan before giving up
+            log.warning("%s: read attempt %d/%d failed%s", alias, attempt, READ_ATTEMPTS,
+                        "; retrying" if attempt < READ_ATTEMPTS else "")
+            time.sleep(2)
         batteries.append(summarize(label, mac, raw) if raw else
                          {'label': label, 'mac': mac, 'ok': False})
         time.sleep(1)  # brief gap between BLE connects
