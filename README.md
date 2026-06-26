@@ -24,12 +24,16 @@ The Raspberry Pi Zero is powered via a 12V-to-5V step-down converter and connect
 ## Architecture
 
 - **Pi to Server**: Bulk upload via `/log/bulk` every `UPLOAD_INTERVAL` seconds (default 30s)
-- **Local buffering**: Pi logs all frames to JSONL with byte-offset tracking; unsent data survives network outages
-- **14-day local archive**: Sent data is archived on the Pi's SD card before pruning
-- **Backfill on redeploy**: If the server database is empty after a restart, the Pi replays its full archive automatically
-- **Ephemeral server DB**: SQLite on Render free tier resets on restart; Pi repopulates via backfill. Use a Render Disk for persistent storage.
+- **Local buffering**: Pi logs all frames to JSONL with byte-offset tracking; unsent data survives network outages. Uploads are chunked under the server's 1 MB limit, so a large backlog drains across several requests instead of failing as one oversized POST.
+- **14-day local archive**: Sent data is archived on the Pi's SD card (pruned at most once a day to limit SD-card wear)
+- **Backfill on redeploy**: If the server database is ever empty, the Pi replays its full archive automatically
+- **Persistent server DB**: SQLite lives on a Render Disk mounted at `/data`, so it survives restarts and redeploys
 - **Deduplication**: Server skips entries with timestamps already in the database
 - **Thread safety**: Cleanup operations are guarded by a threading lock for safe use under gunicorn
+
+## Runtime Estimation
+
+The MPPT controller reports only charge current, not house load, so runtime can't be read directly. Instead the server derives average consumption from an **energy balance** over a trailing 72-hour window — solar harvested (the controller's lifetime yield counter `H19`) minus the change in stored energy — then divides the usable charge (down to a ~10% floor) by that figure. The dashboard shows runtime at your recent average draw plus a Starlink-scenario line. For exact load metering, add a battery shunt (e.g. Victron SmartShunt).
 
 ## Environment Variables
 
@@ -142,7 +146,7 @@ sudo systemctl status vedirect_logger
 tail -f /var/log/vedirect/vedirect_error.log
 ```
 
-Within ~30 seconds you should see `[Serial] Connected`, `[Status] POST succeeded`, and `[Log] Frame written locally`. The Pi posts an initial status immediately on startup, so it will appear on the dashboard right away.
+Within ~30 seconds you should see `[Serial] Connected`, `[Status] POST succeeded`, and `[Upload] Bulk POST succeeded`. The Pi posts an initial status immediately on startup, so it will appear on the dashboard right away.
 
 ### Common gotchas
 
@@ -165,6 +169,16 @@ Logs are stored in `/var/log/vedirect/`:
 - `solar_archive.jsonl` -- 14-day rolling archive of uploaded data
 - `vedirect_error.log` -- operational log (errors and status messages)
 - `sent_offset.txt` -- upload byte-offset tracker
+
+Install log rotation so `vedirect_error.log` doesn't grow unbounded:
+
+```bash
+sudo cp deploy/vedirect-logrotate.conf /etc/logrotate.d/vedirect
+sudo chown root:root /etc/logrotate.d/vedirect
+sudo chmod 644 /etc/logrotate.d/vedirect
+```
+
+Edit the `su` line in that file to match the user/group that owns `/var/log/vedirect`.
 
 ## Running the Server
 
@@ -192,11 +206,11 @@ gunicorn app:app
 
 ## Deployment Notes
 
-- Hosted on Render.com free tier with ephemeral filesystem
-- SQLite database lives at `/data/vedirect.db` (override with `DB_DIR`); resets on service restart unless a Render Disk is attached
-- Pi bulk-uploads repopulate the database within one upload cycle after restart
+- Hosted on Render.com (Starter plan) with a 1 GB persistent Disk mounted at `/data`
+- SQLite database lives at `/data/vedirect.db` (override with `DB_DIR`) and persists across restarts and redeploys
+- If the database is ever empty, Pi bulk-uploads/backfill repopulate it within one upload cycle
 - The server retains 30 days of solar logs and 7 days of Pi status, pruned daily
-- Request bodies are capped at 1 MB (`MAX_CONTENT_LENGTH`)
+- Request bodies are capped at 1 MB (`MAX_CONTENT_LENGTH`); oversized bodies receive a `413`
 - Environment variables must be configured in the Render dashboard and the Pi systemd service file
 
 ## Security Features
