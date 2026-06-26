@@ -627,6 +627,7 @@ def index():
         server_log("GET", f"Failed to fetch Pi status: {e}", "warning")
 
     # Parse logs
+    batt_series = []  # (ts, soc%, house_load_w) for frames carrying measured battery data
     for row in rows:
         try:
             data = json.loads(row["data"])
@@ -644,6 +645,11 @@ def index():
             h20 = clean_int(data.get("H20", 0)) / 100
             h21 = clean_int(data.get("H21", 0))
             parsed.append((ts, v, i, ppv, vpv, load, cs, err, h20, h21))
+            bat = data.get("battery")
+            if bat and bat.get("soc") is not None:
+                # true house load = MPPT output (V*I) minus battery net power
+                house = max(0, round(v * i - (bat.get("power") or 0), 1))
+                batt_series.append((ts, bat["soc"], house))
         except Exception as e:
             server_log("GET", f"Skipping row due to error: {e}", "warning")
 
@@ -698,6 +704,15 @@ def index():
     voltage_timestamps, voltage_values = build_voltage_series(parsed_chrono)
     timestamps = [fmt_mt(p[0]) for p in reversed(parsed)]
     powers = [p[3] for p in reversed(parsed)]
+
+    # Battery charts (measured) — chronological; only frames carrying battery data.
+    batt_chrono = list(reversed(batt_series))
+    batt_times = [fmt_mt(b[0]) for b in batt_chrono]
+    batt_soc_values = [b[1] for b in batt_chrono]
+    batt_load_values = [b[2] for b in batt_chrono]
+    SOC_DANGER = 20  # red floor line: regularly draining below this shortens LiFePO4 life
+    # Daily-energy chart: scale to the data instead of a fixed 1.6 ceiling
+    h20_ymax = max([round(max(h20_values) * 1.25, 1), 0.5]) if h20_values else 1.6
 
     # Pi health pills
     try:
@@ -859,6 +874,10 @@ def index():
 
     # Current solar power (latest panel watts) for the Solar System panel
     solar_now = parsed[0][3] if parsed else 0
+    solar_class, solar_label = make_status_pill(solar_now, [
+        (5, ("gray", "Off")), (50, ("yellow", "Low")),
+        (150, ("green", "Good")), (float('inf'), ("green", "Strong")),
+    ])
 
     # Disk status
     data_percent, data_class, data_label = get_disk_status(DB_DIR)
@@ -940,8 +959,9 @@ def index():
             font-size: 13px;
             background: var(--bg);
             color: var(--text);
-            height: 100vh;
-            overflow: hidden;
+            min-height: 100vh;
+            overflow-x: hidden;
+            overflow-y: auto;
             display: flex;
             flex-direction: column;
         }}
@@ -998,11 +1018,10 @@ def index():
         .dashboard {{
             display: grid;
             grid-template-columns: 1fr 1fr;
-            grid-template-rows: auto auto 1fr 1fr auto;
+            grid-auto-rows: min-content;
             gap: 6px;
             padding: 6px;
             flex: 1;
-            overflow: hidden;
         }}
         .panel-wide {{ grid-column: 1 / -1; }}
 
@@ -1055,6 +1074,7 @@ def index():
             padding: 6px 8px;
             display: flex;
             flex-direction: column;
+            height: 240px;
         }}
         .chart-panel h2 {{
             font-family: 'JetBrains Mono', monospace;
@@ -1184,7 +1204,7 @@ def index():
     <div class="panel">
         <h2>Solar System</h2>
         <div class="metric"><span class="metric-label">Solar data</span><span class="metric-value"><span class="pill {status_color}">{status_text}</span></span></div>
-        <div class="metric"><span class="metric-label">Solar power</span><span class="metric-value">{solar_now} W</span></div>
+        <div class="metric"><span class="metric-label">Solar power</span><span class="metric-value">{solar_now} W <span class="pill {solar_class}">{solar_label}</span></span></div>
         <div class="metric"><span class="metric-label">Panel V</span><span class="metric-value">{latest_vpv:.2f} V <span class="pill {vpv_color}">{vpv_message}</span></span></div>
     </div>
 
@@ -1245,6 +1265,18 @@ def index():
     <div class="chart-panel">
         <h2>Daily Peak Power (W)</h2>
         <div class="chart-wrap"><canvas id="chartH21"></canvas></div>
+    </div>
+
+    <!-- Chart: Battery SOC (measured) -->
+    <div class="chart-panel">
+        <h2>Battery SOC (%)</h2>
+        <div class="chart-wrap"><canvas id="chartSOC"></canvas></div>
+    </div>
+
+    <!-- Chart: House Load (measured) -->
+    <div class="chart-panel">
+        <h2>House Load (W)</h2>
+        <div class="chart-wrap"><canvas id="chartLoad"></canvas></div>
     </div>
 
     <!-- Latest Readings Table -->
@@ -1343,18 +1375,16 @@ new Chart(document.getElementById('chartVoltage'), {{
     options: chartOpts(12.5, 14.6, 0.5)
 }});
 
-// Daily Energy H20
+// Daily Energy H20 (solar production; scaled to data)
 new Chart(document.getElementById('chartH20'), {{
     type: 'line',
     data: {{
         labels: {json.dumps(h20_days)},
         datasets: [
-            {{ data: {json.dumps(h20_values)}, borderColor: style.getPropertyValue('--chart-h20').trim(), backgroundColor: style.getPropertyValue('--chart-h20-fill').trim(), fill: true, tension: 0.2, pointRadius: 2 }},
-            {{ data: Array({len(h20_days)}).fill(1.5), borderColor: style.getPropertyValue('--pill-red').trim(), borderDash: [4,3], fill: false, pointRadius: 0 }},
-            {{ data: Array({len(h20_days)}).fill(0.14), borderColor: style.getPropertyValue('--pill-yellow').trim(), borderDash: [3,3], fill: false, pointRadius: 0 }}
+            {{ data: {json.dumps(h20_values)}, borderColor: style.getPropertyValue('--chart-h20').trim(), backgroundColor: style.getPropertyValue('--chart-h20-fill').trim(), fill: true, tension: 0.2, pointRadius: 2 }}
         ]
     }},
-    options: chartOpts(0, 1.6, 0.4)
+    options: chartOpts(0, {h20_ymax}, {round(h20_ymax / 4, 2)})
 }});
 
 // Daily Max Power H21
@@ -1365,6 +1395,29 @@ new Chart(document.getElementById('chartH21'), {{
         datasets: [{{ data: {json.dumps(h21_values)}, backgroundColor: style.getPropertyValue('--chart-h21').trim(), borderColor: style.getPropertyValue('--chart-h21-border').trim(), borderWidth: 1 }}]
     }},
     options: chartOpts(0, 300, 50)
+}});
+
+// Battery SOC (measured) with a red danger floor at {SOC_DANGER}%
+new Chart(document.getElementById('chartSOC'), {{
+    type: 'line',
+    data: {{
+        labels: {json.dumps(batt_times)},
+        datasets: [
+            {{ data: {json.dumps(batt_soc_values)}, borderColor: style.getPropertyValue('--chart-voltage').trim(), backgroundColor: style.getPropertyValue('--chart-voltage-fill').trim(), fill: true, tension: 0.3, pointRadius: 0 }},
+            {{ data: Array({len(batt_times)}).fill({SOC_DANGER}), borderColor: style.getPropertyValue('--pill-red').trim(), borderDash: [4,3], fill: false, pointRadius: 0 }}
+        ]
+    }},
+    options: chartOpts(0, 100, 20)
+}});
+
+// House Load (measured, W)
+new Chart(document.getElementById('chartLoad'), {{
+    type: 'line',
+    data: {{
+        labels: {json.dumps(batt_times)},
+        datasets: [{{ data: {json.dumps(batt_load_values)}, borderColor: style.getPropertyValue('--chart-power').trim(), fill: false, tension: 0.2, pointRadius: 0 }}]
+    }},
+    options: chartOpts(0, null, null)
 }});
 </script>
 </body>
