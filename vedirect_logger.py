@@ -58,12 +58,19 @@ if not POST_SECRET:
     raise SystemExit(1)
 # Ensure log directory exists
 UPLOAD_INTERVAL = 30     # 30s — upload every other loop cycle
+# Cap each bulk POST well under the server's MAX_CONTENT_LENGTH (1 MB). Without
+# this, a backlog that ever grows past 1 MB (e.g. after a stretch of failed
+# uploads) gets sent in a single oversized request that the server rejects with
+# a 400 forever — the offset never advances, so the backlog can never drain.
+MAX_UPLOAD_BYTES = 700_000
 BASE_URL = os.environ.get("BASE_URL")
 if not BASE_URL:
     print("[FATAL] BASE_URL environment variable is not set. Exiting.")
     raise SystemExit(1)
 ARCHIVE_PATH = "/var/log/vedirect/solar_archive.jsonl"
 MAX_ARCHIVE_DAYS = 14
+ARCHIVE_PRUNE_INTERVAL = 86400  # rewrite/prune the archive at most once a day
+_last_archive_prune = 0         # set on first prune so we don't rewrite every upload
 
 # ------------------ Logging ------------------ #
 def log_error(message):
@@ -129,6 +136,8 @@ def update_fan(pwm, temp, current_duty):
         slope = (100 - FAN_MIN_DUTY) / (ON_TEMP - OFF_TEMP)
         new_duty = int(FAN_MIN_DUTY + slope * (temp - OFF_TEMP))
 
+    # Only act and log on an actual change — logging every hold flooded the log
+    # with a line every loop (the single biggest source of log growth).
     if new_duty != current_duty:
         pwm.ChangeDutyCycle(new_duty)
 
@@ -136,8 +145,6 @@ def update_fan(pwm, temp, current_duty):
             GPIO.output(FAN_PIN, GPIO.LOW)  # Ensure pin is LOW at 0%
 
         log_error(f"[Fan] Adjusted to {new_duty}% (CPU Temp: {temp}°C)")
-    else:
-        log_error(f"[Fan] Holding {current_duty}% (CPU Temp: {temp}°C)")
 
     return new_duty
 
@@ -280,15 +287,26 @@ def upload_unsent_logs():
     try:
         offset = get_last_sent_offset()
         entries = []
+        batch_bytes = 0
+        new_offset = offset
         with open(LOG_PATH, "r") as f:
             f.seek(offset)
-            for line in f:
+            # Read line-by-line and stop once the accumulated payload nears the
+            # size cap, so a large backlog is uploaded in several requests rather
+            # than one oversized POST. Track the byte offset manually (rather than
+            # f.tell(), which is unreliable when mixed with iteration) so prune
+            # only drops the lines we actually sent; the rest go next cycle.
+            for line in iter(f.readline, ""):
+                if entries and batch_bytes + len(line) > MAX_UPLOAD_BYTES:
+                    break
+                new_offset += len(line.encode("utf-8"))
                 try:
                     entries.append(json.loads(line))
                 except Exception:
-                    continue
+                    pass
+                batch_bytes += len(line)
             if entries and bulk_upload(entries):
-                update_last_sent_offset(f.tell())
+                update_last_sent_offset(new_offset)
                 archive_sent_logs()
                 prune_sent_logs()
 
@@ -313,18 +331,14 @@ def get_wifi_signal_strength():
         log_error(f"[WiFi] Signal fetch error: {e}")
     return "unknown"
 
-def archive_sent_logs():
-    """Copy sent entries to archive before pruning, keeping 14 days max."""
+def prune_archive():
+    """Trim the archive to MAX_ARCHIVE_DAYS by rewriting it. This reads and
+    rewrites the whole file, so it is throttled to once a day by the caller —
+    doing it on every upload meant rewriting tens of MB every 30 s, which is
+    needless SD-card wear."""
     try:
-        offset = get_last_sent_offset()
-        if offset <= 0:
+        if not os.path.exists(ARCHIVE_PATH):
             return
-
-        with open(LOG_PATH, "r") as f:
-            sent_data = f.read(offset)
-        with open(ARCHIVE_PATH, "a") as f:
-            f.write(sent_data)
-
         cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_ARCHIVE_DAYS)
         kept = []
         with open(ARCHIVE_PATH, "r") as f:
@@ -342,11 +356,30 @@ def archive_sent_logs():
                 except (json.JSONDecodeError, ValueError, TypeError):
                     log_error(f"[Archive] Skipping malformed entry: {line.strip()[:80]}")
                     continue
-
         with open(ARCHIVE_PATH, "w") as f:
             f.writelines(kept)
+        log_error(f"[Archive] Pruned archive, kept {len(kept)} entries within {MAX_ARCHIVE_DAYS} days")
+    except Exception as e:
+        log_error(f"[Archive] Prune failed: {e}")
 
-        log_error(f"[Archive] Archived sent logs, kept {len(kept)} entries within {MAX_ARCHIVE_DAYS} days")
+
+def archive_sent_logs():
+    """Append just-sent entries to the archive (cheap, append-only). The
+    expensive 14-day prune is rewritten at most once a day, not every upload."""
+    try:
+        offset = get_last_sent_offset()
+        if offset <= 0:
+            return
+
+        with open(LOG_PATH, "r") as f:
+            sent_data = f.read(offset)
+        with open(ARCHIVE_PATH, "a") as f:
+            f.write(sent_data)
+
+        global _last_archive_prune
+        if time.time() - _last_archive_prune > ARCHIVE_PRUNE_INTERVAL:
+            prune_archive()
+            _last_archive_prune = time.time()
     except Exception as e:
         log_error(f"[Archive] Failed: {e}")
 
@@ -533,7 +566,6 @@ def main():
                             with open(LOG_PATH, "a") as f:
                                 json.dump(frame, f)
                                 f.write("\n")
-                            log_error(f"[Log] Frame written locally at {frame['timestamp']}")
                         except Exception as e:
                             log_error(f"[Log] Local write failed: {e}")
 

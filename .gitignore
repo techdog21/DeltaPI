@@ -12,9 +12,10 @@ build/
 *.pem
 *.key
 
-# IDE
+# IDE / tooling
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~

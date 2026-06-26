@@ -77,6 +77,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from cryptography.fernet import Fernet
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.exceptions import HTTPException
 from dateutil.parser import parse as parse_date
 from flask import has_request_context
 from markupsafe import escape
@@ -85,6 +86,13 @@ from markupsafe import escape
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1)
 app.config["MAX_CONTENT_LENGTH"] = 1_000_000  # reject request bodies larger than 1 MB
+
+@app.errorhandler(413)
+def request_too_large(e):
+    """Return an explicit 413 (not a generic 400) when a body exceeds
+    MAX_CONTENT_LENGTH, so an oversized upload is unambiguous to the client."""
+    return jsonify({"error": "Payload too large",
+                    "max_bytes": app.config["MAX_CONTENT_LENGTH"]}), 413
 
 # ------------------ Configuration ------------------ #
 DB_DIR = os.environ.get("DB_DIR", "/data")
@@ -100,6 +108,14 @@ if not FERNET_KEY:
     logging.warning("FERNET_KEY is not set — /encrypt_days will be unavailable")
 fernet = Fernet(FERNET_KEY.encode()) if FERNET_KEY else None
 MAX_DAYS = 30  # matches the 30-day retention enforced by cleanup_old_records
+# Battery / runtime model. The MPPT reports only charge current (never house
+# load), so consumption is derived from energy balance instead — see
+# estimate_avg_load_w(). Constants below were calibrated against ~14 days of
+# field data (parked base ~5 W; woods-with-Starlink 24h average ~45-50 W).
+BATTERY_CAPACITY_WH = 200 * 12   # 200 Ah @ 12 V nominal pack
+SOC_FLOOR = 10                   # don't plan usable capacity below ~10% on LiFePO4
+STARLINK_W = 50                  # measured 24h avg draw on active Starlink days
+LOAD_WINDOW_HOURS = 72           # trailing window for the empirical load estimate
 _last_cleanup = 0
 _cleanup_lock = threading.Lock()
 MT = ZoneInfo("America/Denver")
@@ -259,6 +275,45 @@ def estimate_runtime_wh(draw_w, battery_wh):
         return f"{hours:.1f} hours (~{hours/24:.1f} days)"
     return "Idle or charging"
 
+def estimate_avg_load_w(conn, now, hours=LOAD_WINDOW_HOURS):
+    """
+    Trailing average house load (W) derived from energy balance, since the MPPT
+    cannot measure load directly:  load = solar_harvested - change_in_stored.
+    Solar harvested comes from H19 (monotonic lifetime yield counter, robust to
+    the daily H20 reset); stored-energy change from voltage-based SOC at the
+    window edges. Returns None when there isn't enough clean data to be useful.
+    """
+    since = (now - timedelta(hours=hours)).isoformat()
+    pts = []  # (timestamp, voltage, h19_kwh)
+    try:
+        rows = conn.execute(
+            "SELECT data FROM logs WHERE timestamp >= ? ORDER BY timestamp ASC", (since,)
+        ).fetchall()
+    except Exception:
+        return None
+    for (raw,) in rows:
+        try:
+            d = json.loads(raw)
+            v = clean_int(d.get("V", 0)) / 1000
+            if v < 11:  # skip noise / corrupt zero frames
+                continue
+            ts = ensure_utc(datetime.fromisoformat(d.get("timestamp")))
+            pts.append((ts, v, clean_int(d.get("H19", 0)) / 100))
+        except Exception:
+            continue
+    if len(pts) < 10:
+        return None
+    elapsed_h = (pts[-1][0] - pts[0][0]).total_seconds() / 3600
+    if elapsed_h < 6:
+        return None
+    h19 = [p[2] for p in pts if p[2] > 0]
+    if len(h19) < 2:
+        return None
+    solar_wh = (max(h19) - min(h19)) * 1000  # counter is monotonic, so max-min = harvested
+    dstored_wh = BATTERY_CAPACITY_WH * (estimate_soc(pts[-1][1]) - estimate_soc(pts[0][1])) / 100
+    load_w = (solar_wh - dstored_wh) / elapsed_h
+    return load_w if 0.5 < load_w < 1000 else None
+
 def make_status_pill(value, thresholds):
     """
     Assigns a CSS class and label based on numeric thresholds.
@@ -409,6 +464,8 @@ def bulk_log():
         entries = request.get_json()
         if not isinstance(entries, list):
             raise ValueError("Expected a list of entries")
+    except HTTPException:
+        raise  # e.g. 413 Payload Too Large — let Flask return the right status
     except Exception as e:
         server_log("POST", f"Bad bulk JSON from {client_ip}: {e}", "warning")
         return jsonify({"error": "Invalid JSON"}), 400
@@ -448,7 +505,7 @@ def bulk_log():
 @limiter.limit("10 per minute")
 def encrypt_days():
     """
-    Encrypts the requested number of days (1-60) into a Fernet token for secure URL usage.
+    Encrypts the requested number of days (1 to MAX_DAYS) into a Fernet token for secure URL usage.
     Used by the dashboard's date range selector to prevent tampering with query parameters.
     """
     try:
@@ -460,7 +517,7 @@ def encrypt_days():
             return jsonify({"error": "HTTPS required"}), 403
         raw_days = request.args.get("days", "7")
         days = int(raw_days)
-        if not (1 <= days <= 60):
+        if not (1 <= days <= MAX_DAYS):
             raise ValueError(f"Out-of-range: {days}")
         token = fernet.encrypt(str(days).encode()).decode()
         server_log("GET", f"Token generated for {days} day(s) from {request.remote_addr}", "info")
@@ -625,18 +682,6 @@ def index():
 
     existing_days = conn.execute("SELECT COUNT(DISTINCT DATE(timestamp)) FROM logs").fetchone()[0]
 
-    # Runtime estimates
-    try:
-        battery_wh = 200 * 12
-        runtime_str = estimate_runtime_wh(voltages[0] * currents[0], battery_wh)
-    except Exception:
-        runtime_str = "N/A"
-
-    try:
-        starlink_runtime_str = estimate_runtime_wh(31, battery_wh)
-    except Exception:
-        starlink_runtime_str = "N/A"
-
     # H20/H21 aggregation
     daily_h20 = defaultdict(float)
     daily_h21 = defaultdict(float)
@@ -749,6 +794,26 @@ def index():
             soc_color, soc_label = soc_pill(soc_percent)
     else:
         soc_percent, soc_color, soc_label = 0, "gray", "Unknown"
+
+    # Runtime estimates. The MPPT reports only charge current, never house load,
+    # so runtime is based on the empirically measured average draw (energy
+    # balance over the last few days) against the usable charge on hand down to
+    # the planning floor. Two figures: at your recent typical draw, and a
+    # worst-case "Starlink running" scenario.
+    avg_load_w = estimate_avg_load_w(conn, now) if parsed else None
+    usable_wh = BATTERY_CAPACITY_WH * max(0, soc_percent - SOC_FLOOR) / 100 if parsed else 0
+    charging_note = " (charging — SOC reads high)" if is_charging else ""
+
+    if avg_load_w and usable_wh > 0:
+        runtime_str = f"{estimate_runtime_wh(avg_load_w, usable_wh)} @ ~{avg_load_w:.0f}W avg{charging_note}"
+    else:
+        runtime_str = "N/A"
+
+    # Starlink scenario: usable charge at the measured active-Starlink draw.
+    if parsed and usable_wh > 0:
+        starlink_runtime_str = f"{estimate_runtime_wh(STARLINK_W, usable_wh)} @ {STARLINK_W}W{charging_note}"
+    else:
+        starlink_runtime_str = "N/A"
 
     # Disk status
     data_percent, data_class, data_label = get_disk_status(DB_DIR)
@@ -1036,7 +1101,7 @@ def index():
     <div class="header-controls">
         <form method="get" onsubmit="event.preventDefault(); encryptAndSubmit();">
             <label>Last</label>
-            <input type="number" id="daysInput" value="{days}" min="1" max="60">
+            <input type="number" id="daysInput" value="{days}" min="1" max="{MAX_DAYS}">
             <label>days</label>
             <input type="hidden" id="tokenInput" name="token">
             <button type="submit">Update</button>
