@@ -683,22 +683,18 @@ def index():
 
     existing_days = conn.execute("SELECT COUNT(DISTINCT DATE(timestamp)) FROM logs").fetchone()[0]
 
-    # H20/H21 aggregation
+    # Daily energy (H20) aggregation
     daily_h20 = defaultdict(float)
-    daily_h21 = defaultdict(float)
     for row in reversed(parsed):
         try:
             ts = datetime.fromisoformat(row[0])
             day = ts.date().isoformat()
             daily_h20[day] = row[8]
-            daily_h21[day] = max(daily_h21[day], row[9])
         except Exception:
             continue
 
     h20_days = sorted(daily_h20.keys())
     h20_values = [round(daily_h20[day], 2) for day in h20_days]
-    h21_days = sorted(daily_h21.keys())
-    h21_values = [round(daily_h21[day], 2) for day in h21_days]
 
     # Voltage chart
     voltage_timestamps, voltage_values = build_voltage_series(parsed_chrono)
@@ -874,8 +870,10 @@ def index():
 
     # Current solar power (latest panel watts) for the Solar System panel
     solar_now = parsed[0][3] if parsed else 0
+    # Solar has no "bad" state, so color only conveys producing (green) vs off
+    # (gray); the label carries the magnitude.
     solar_class, solar_label = make_status_pill(solar_now, [
-        (5, ("gray", "Off")), (50, ("yellow", "Low")),
+        (5, ("gray", "Off")), (50, ("green", "Low")),
         (150, ("green", "Good")), (float('inf'), ("green", "Strong")),
     ])
 
@@ -1150,6 +1148,9 @@ def index():
             .chart-panel {{ min-height: 200px; }}
             .header {{ flex-wrap: wrap; gap: 6px; }}
             .header h1 {{ font-size: 13px; }}
+            /* stop the controls flowing off-screen: full-width row that wraps */
+            .header-controls {{ flex-wrap: wrap; gap: 6px; width: 100%; }}
+            .header form {{ flex-wrap: wrap; }}
             /* let long values (battery feed, wifi) wrap instead of forcing width */
             .metric {{ font-size: 11px; flex-wrap: wrap; }}
             .metric-value {{ font-size: 11px; word-break: break-word; text-align: right; }}
@@ -1196,7 +1197,7 @@ def index():
         <div class="metric"><span class="metric-label">SOC</span><span class="metric-value">{soc_percent}% <span class="pill {soc_color}">{soc_label}</span></span></div>
         <div class="metric"><span class="metric-label">Battery V</span><span class="metric-value">{latest_voltage} <span class="pill {latest_voltage_class}">{latest_voltage_label}</span></span></div>
         <div class="metric"><span class="metric-label">Battery feed</span><span class="metric-value">{batt_per_display}<span class="pill {batt_feed_class}">{batt_feed_label}</span></span></div>
-        <div class="metric"><span class="metric-label">House load</span><span class="metric-value">{house_load_str}</span></div>
+        <div class="metric"><span class="metric-label">Consumption</span><span class="metric-value">{house_load_str}</span></div>
         <div class="metric"><span class="metric-label">Runtime</span><span class="metric-value">{runtime_str}</span></div>
     </div>
 
@@ -1261,21 +1262,15 @@ def index():
         <div class="chart-wrap"><canvas id="chartH20"></canvas></div>
     </div>
 
-    <!-- Chart: Daily Max Power H21 -->
-    <div class="chart-panel">
-        <h2>Daily Peak Power (W)</h2>
-        <div class="chart-wrap"><canvas id="chartH21"></canvas></div>
-    </div>
-
     <!-- Chart: Battery SOC (measured) -->
     <div class="chart-panel">
         <h2>Battery SOC (%)</h2>
         <div class="chart-wrap"><canvas id="chartSOC"></canvas></div>
     </div>
 
-    <!-- Chart: House Load (measured) -->
+    <!-- Chart: Consumption (measured) -->
     <div class="chart-panel">
-        <h2>House Load (W)</h2>
+        <h2>Consumption (W)</h2>
         <div class="chart-wrap"><canvas id="chartLoad"></canvas></div>
     </div>
 
@@ -1385,16 +1380,6 @@ new Chart(document.getElementById('chartH20'), {{
         ]
     }},
     options: chartOpts(0, {h20_ymax}, {round(h20_ymax / 4, 2)})
-}});
-
-// Daily Max Power H21
-new Chart(document.getElementById('chartH21'), {{
-    type: 'bar',
-    data: {{
-        labels: {json.dumps(h21_days)},
-        datasets: [{{ data: {json.dumps(h21_values)}, backgroundColor: style.getPropertyValue('--chart-h21').trim(), borderColor: style.getPropertyValue('--chart-h21-border').trim(), borderWidth: 1 }}]
-    }},
-    options: chartOpts(0, 300, 50)
 }});
 
 // Battery SOC (measured) with a red danger floor at {SOC_DANGER}%
