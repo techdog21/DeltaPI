@@ -24,6 +24,7 @@ import time
 import logging
 import threading
 import asyncio
+import subprocess
 from datetime import datetime, timezone
 
 # find the vendored renogybt package regardless of cwd
@@ -37,7 +38,22 @@ STATE_PATH = os.path.join(STATE_DIR, "battery_state.json")
 POLL_INTERVAL = int(os.environ.get("BATT_POLL_INTERVAL", "60"))  # seconds between cycles
 PER_BATT_TIMEOUT = int(os.environ.get("BATT_READ_TIMEOUT", "40"))  # per-battery read budget
 READ_ATTEMPTS = int(os.environ.get("BATT_READ_ATTEMPTS", "3"))  # retries if a BLE scan misses a battery
+GRACE_S = int(os.environ.get("BATT_GRACE", "300"))  # keep a battery's last-good reading this long if it misses
 ADAPTER = os.environ.get("BATT_ADAPTER", "hci0")
+
+# Last-good reading per battery id, so a single missed scan doesn't flip the
+# whole feed to "degraded" (and the dashboard to the way-off estimate).
+_last_good = {}
+
+
+def clear_link(mac):
+    """Drop any existing BLE connection to this MAC. A process killed mid-connect
+    (e.g. by `systemctl restart`) can leave a battery stuck 'connected' so it stops
+    advertising and can't be re-discovered; disconnecting frees it."""
+    try:
+        subprocess.run(["bluetoothctl", "disconnect", mac], timeout=10, capture_output=True)
+    except Exception:
+        pass
 
 # (label, MAC, BLE alias). Alias must match the advertised name.
 BATTERIES = [
@@ -119,17 +135,31 @@ def summarize(label, mac, alias, raw):
 def poll_once():
     batteries = []
     for label, mac, alias in BATTERIES:
+        bid = alias[-3:]
         raw = None
         for attempt in range(1, READ_ATTEMPTS + 1):
             raw = read_battery(mac, alias)
             if raw:
                 break
-            # a single 5s BLE scan occasionally misses a battery; re-scan before giving up
+            # a single scan occasionally misses a battery; clear any stale link and re-scan
             log.warning("%s: read attempt %d/%d failed%s", alias, attempt, READ_ATTEMPTS,
                         "; retrying" if attempt < READ_ATTEMPTS else "")
+            clear_link(mac)
             time.sleep(2)
-        batteries.append(summarize(label, mac, alias, raw) if raw else
-                         {'label': label, 'mac': mac, 'id': alias[-3:], 'ok': False})
+        if raw:
+            s = summarize(label, mac, alias, raw)
+            _last_good[bid] = (time.time(), s)
+            batteries.append(s)
+        else:
+            prev = _last_good.get(bid)
+            age = (time.time() - prev[0]) if prev else None
+            if prev and age < GRACE_S:
+                # ride out a transient miss with the last-good reading (still counts ok)
+                s = dict(prev[1]); s["stale_s"] = int(age)
+                batteries.append(s)
+                log.info("%s: miss; using last-good (%ds old)", alias, int(age))
+            else:
+                batteries.append({'label': label, 'mac': mac, 'id': bid, 'ok': False})
         time.sleep(1)  # brief gap between BLE connects
 
     ok = [b for b in batteries if b.get('ok')]
@@ -167,6 +197,8 @@ def write_state(state):
 
 def main():
     log.info("Starting renogy_ble poller -> %s every %ss", STATE_PATH, POLL_INTERVAL)
+    for _, mac, _ in BATTERIES:
+        clear_link(mac)  # clear any stale links left by a previous unclean exit/restart
     while True:
         start = time.time()
         try:

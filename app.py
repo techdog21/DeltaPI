@@ -817,8 +817,12 @@ def index():
 
     batt_per_str = ""
     if battery and battery.get("per"):
-        batt_per_str = "  ".join(f"{p.get('id') or p.get('label')}:{p.get('soc')}%"
-                                 for p in battery["per"] if p.get("ok") and p.get("soc") is not None)
+        parts = []
+        for p in battery["per"]:
+            if p.get("ok") and p.get("soc") is not None:
+                name = p.get("id") or p.get("label")
+                parts.append(f"{name}:{p['soc']}%" if name else f"{p['soc']}%")
+        batt_per_str = " ".join(parts)
     batt_per_display = f"{batt_per_str} " if (batt_live and batt_per_str) else ""
 
     # SOC — measured when the feed is live, else voltage estimate
@@ -1113,18 +1117,22 @@ def index():
         }}
 
         @media (max-width: 768px) {{
-            body {{ overflow: auto; height: auto; }}
+            html, body {{ overflow-x: hidden; max-width: 100%; }}
+            body {{ overflow-y: auto; height: auto; }}
             .dashboard {{
                 grid-template-columns: 1fr;
                 grid-template-rows: auto;
-                overflow: auto;
+                overflow-x: hidden;
+                overflow-y: auto;
             }}
+            .panel-wide {{ grid-column: 1; }}
             .table-panel {{ grid-column: 1; }}
             .chart-panel {{ min-height: 200px; }}
             .header {{ flex-wrap: wrap; gap: 6px; }}
             .header h1 {{ font-size: 13px; }}
-            .metric {{ font-size: 11px; }}
-            .metric-value {{ font-size: 11px; }}
+            /* let long values (battery feed, wifi) wrap instead of forcing width */
+            .metric {{ font-size: 11px; flex-wrap: wrap; }}
+            .metric-value {{ font-size: 11px; word-break: break-word; text-align: right; }}
         }}
     </style>
     <script>
