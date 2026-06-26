@@ -5,6 +5,9 @@ __pycache__/
 dist/
 build/
 *.egg
+.venv/
+venv/
+env/
 
 # Environment
 .env
@@ -19,6 +22,12 @@ build/
 *.swp
 *.swo
 *~
+
+# Backups / scratch
+*.bak
+*.tmp
+*.old
+*.orig
 
 # OS
 .DS_Store
