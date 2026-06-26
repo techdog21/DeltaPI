@@ -3,7 +3,7 @@ import logging
 import sys
 from bleak import BleakClient, BleakScanner, BLEDevice
 
-DISCOVERY_TIMEOUT = 5 # max wait time to complete the bluetooth scanning (seconds)
+DISCOVERY_TIMEOUT = 10 # max wait to complete BLE scanning (s); 5s intermittently missed a battery
 
 class BLEManager:
     def __init__(self, mac_address, alias, on_data, on_connect_fail, write_service_uuid, notify_char_uuid, write_char_uuid):

@@ -542,8 +542,9 @@ def read_battery_state():
         "power": bank.get("power"),
         "remaining_ah": bank.get("remaining_ah"),
         "capacity_ah": bank.get("capacity_ah"),
-        "per": [{"soc": b.get("soc"), "current": b.get("current"), "temps_f": b.get("temps_f")}
-                for b in s.get("batteries", []) if b.get("ok")],
+        "per": [{"id": b.get("id"), "ok": b.get("ok"), "soc": b.get("soc"),
+                 "current": b.get("current"), "temps_f": b.get("temps_f")}
+                for b in s.get("batteries", [])],
     }
 
 # ------------------ Main ------------------ #

@@ -93,7 +93,7 @@ def read_battery(mac, alias):
     return result['data']
 
 
-def summarize(label, mac, raw):
+def summarize(label, mac, alias, raw):
     """Reduce a raw battery dict to the fields we publish."""
     try:
         v = float(raw['voltage'])
@@ -101,7 +101,7 @@ def summarize(label, mac, raw):
         rem = float(raw['remaining_charge'])   # Ah
         cap = float(raw['capacity'])           # Ah (current full-charge capacity)
         return {
-            'label': label, 'mac': mac, 'ok': True,
+            'label': label, 'mac': mac, 'id': alias[-3:], 'ok': True,
             'soc': round(100 * rem / cap, 1) if cap else None,
             'voltage': round(v, 2),
             'current': round(cur, 2),
@@ -113,7 +113,7 @@ def summarize(label, mac, raw):
         }
     except Exception as e:
         log.warning(f"{label}: parse error: {e}")
-        return {'label': label, 'mac': mac, 'ok': False}
+        return {'label': label, 'mac': mac, 'id': alias[-3:], 'ok': False}
 
 
 def poll_once():
@@ -128,8 +128,8 @@ def poll_once():
             log.warning("%s: read attempt %d/%d failed%s", alias, attempt, READ_ATTEMPTS,
                         "; retrying" if attempt < READ_ATTEMPTS else "")
             time.sleep(2)
-        batteries.append(summarize(label, mac, raw) if raw else
-                         {'label': label, 'mac': mac, 'ok': False})
+        batteries.append(summarize(label, mac, alias, raw) if raw else
+                         {'label': label, 'mac': mac, 'id': alias[-3:], 'ok': False})
         time.sleep(1)  # brief gap between BLE connects
 
     ok = [b for b in batteries if b.get('ok')]

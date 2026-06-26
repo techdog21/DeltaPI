@@ -112,9 +112,8 @@ MAX_DAYS = 30  # matches the 30-day retention enforced by cleanup_old_records
 # load), so consumption is derived from energy balance instead — see
 # estimate_avg_load_w(). Constants below were calibrated against ~14 days of
 # field data (parked base ~5 W; woods-with-Starlink 24h average ~45-50 W).
-BATTERY_CAPACITY_WH = 200 * 12   # 200 Ah @ 12 V nominal pack
+BATTERY_CAPACITY_WH = 200 * 12   # 200 Ah @ 12 V nominal pack (estimate fallback only)
 SOC_FLOOR = 10                   # don't plan usable capacity below ~10% on LiFePO4
-STARLINK_W = 50                  # measured 24h avg draw on active Starlink days
 LOAD_WINDOW_HOURS = 72           # trailing window for the empirical load estimate
 _last_cleanup = 0
 _cleanup_lock = threading.Lock()
@@ -265,15 +264,17 @@ def clean_int(value):
     except Exception:
         return 0
 
-def estimate_runtime_wh(draw_w, battery_wh):
+def fmt_runtime(draw_w, battery_wh, tag=""):
     """
-    Estimates battery runtime at given power draw. Returns human-readable string
-    like '12.5 hours (~0.5 days)' or 'Idle or charging' if draw < 0.5W.
+    Compact runtime string from a draw (W) and usable energy (Wh):
+    '2.3 d @ 40W', '18.5 h @ 130W', or '45 min @ 300W'. Returns 'idle' when the
+    draw is negligible. `tag` appends a short marker (e.g. ' est').
     """
-    if draw_w > 0.5:
-        hours = battery_wh / draw_w
-        return f"{hours:.1f} hours (~{hours/24:.1f} days)"
-    return "Idle or charging"
+    if draw_w <= 0.5 or battery_wh <= 0:
+        return "idle"
+    h = battery_wh / draw_w
+    span = f"{h / 24:.1f} d" if h >= 48 else (f"{h:.1f} h" if h >= 1 else f"{int(h * 60)} min")
+    return f"{span} @ {draw_w:.0f}W{tag}"
 
 def estimate_avg_load_w(conn, now, hours=LOAD_WINDOW_HOURS):
     """
@@ -649,20 +650,14 @@ def index():
     # Metrics
     parsed_chrono = []
     if not parsed:
-        latest_voltage = average_voltage = max_voltage = "N/A"
-        average_load = max_load = "N/A"
+        latest_voltage = "N/A"
         latest_vpv = 0
         vpv_message = "No data available"
         table_data = []
     else:
         voltages = [p[1] for p in parsed]
         currents = [p[2] for p in parsed]
-        loads = [round(v * a, 2) for v, a in zip(voltages, currents)]
         latest_voltage = f"{voltages[0]:.2f} V"
-        average_voltage = f"{sum(voltages) / len(voltages):.2f} V"
-        max_voltage = f"{max(voltages):.2f} V"
-        average_load = f"{sum(loads) / len(loads):.2f} W"
-        max_load = f"{max(loads):.2f} W"
         parsed_chrono = list(reversed(parsed))
         table_data = parsed_chrono[-5:] if len(parsed_chrono) > 5 else parsed_chrono
         latest_vpv = parsed[0][4]
@@ -814,13 +809,16 @@ def index():
     elif batt_age_s >= 180:
         batt_feed_class, batt_feed_label = "yellow", f"Stale ({_age_str(batt_age_s)})"
     elif not battery.get("healthy"):
-        batt_feed_class, batt_feed_label = "yellow", f"Degraded {battery.get('ok')}/{battery.get('total')}"
+        down = [str(p.get("id") or p.get("label") or "?") for p in (battery.get("per") or []) if not p.get("ok")]
+        detail = (", ".join(down) + " down") if down else f"{battery.get('ok')}/{battery.get('total')}"
+        batt_feed_class, batt_feed_label = "yellow", f"Degraded — {detail}"
     else:
         batt_feed_class, batt_feed_label = "green", f"Live ({_age_str(batt_age_s)})"
 
     batt_per_str = ""
     if battery and battery.get("per"):
-        batt_per_str = " / ".join(f"{p.get('soc')}%" for p in battery["per"] if p.get("soc") is not None)
+        batt_per_str = "  ".join(f"{p.get('id') or p.get('label')}:{p.get('soc')}%"
+                                 for p in battery["per"] if p.get("ok") and p.get("soc") is not None)
     batt_per_display = f"{batt_per_str} " if (batt_live and batt_per_str) else ""
 
     # SOC — measured when the feed is live, else voltage estimate
@@ -837,34 +835,26 @@ def index():
     else:
         soc_percent, soc_color, soc_label = 0, "gray", "Unknown"
 
-    # Runtime. With a live battery feed we have true SOC and (when discharging)
-    # true load, so runtime is measured. Otherwise fall back to the energy-balance
-    # estimate against the voltage-based SOC.
-    avg_load_w = estimate_avg_load_w(conn, now) if parsed else None
-    charging_note = " (charging — SOC reads high)" if is_charging else ""
-
+    # Runtime. With a live feed it's all measured: true SOC, and true house load
+    # computed as MPPT output power minus the battery's net power (valid whether
+    # charging or discharging). Without the feed, fall back to the energy-balance
+    # estimate (tagged "est").
     if batt_live:
         v = battery.get("voltage") or 0
-        usable_wh = max(0, ((battery.get("remaining_ah") or 0) - (battery.get("capacity_ah") or 0) * SOC_FLOOR / 100) * v)
-        net_w = battery.get("power") or 0  # signed: + charging, - discharging
-        if net_w < -0.5:  # discharging — this is the real measured house load
-            load_w = -net_w
-            runtime_str = f"{estimate_runtime_wh(load_w, usable_wh)} @ {load_w:.0f}W (measured)"
-        elif avg_load_w:
-            runtime_str = f"{estimate_runtime_wh(avg_load_w, usable_wh)} @ ~{avg_load_w:.0f}W avg (charging)"
-        else:
-            runtime_str = "Charging / idle"
-        starlink_runtime_str = f"{estimate_runtime_wh(STARLINK_W, usable_wh)} @ {STARLINK_W}W"
+        usable_wh = max(0, ((battery.get("remaining_ah") or 0)
+                            - (battery.get("capacity_ah") or 0) * SOC_FLOOR / 100) * v)
+        mppt_out_w = voltages[0] * currents[0] if parsed else 0
+        house_load_w = max(0, mppt_out_w - (battery.get("power") or 0))  # true house load
+        house_load_str = f"{house_load_w:.0f} W"
+        runtime_str = fmt_runtime(house_load_w, usable_wh)
     else:
+        avg_load_w = estimate_avg_load_w(conn, now) if parsed else None
         usable_wh = BATTERY_CAPACITY_WH * max(0, soc_percent - SOC_FLOOR) / 100 if parsed else 0
-        if avg_load_w and usable_wh > 0:
-            runtime_str = f"{estimate_runtime_wh(avg_load_w, usable_wh)} @ ~{avg_load_w:.0f}W avg (est){charging_note}"
-        else:
-            runtime_str = "N/A"
-        if parsed and usable_wh > 0:
-            starlink_runtime_str = f"{estimate_runtime_wh(STARLINK_W, usable_wh)} @ {STARLINK_W}W (est){charging_note}"
-        else:
-            starlink_runtime_str = "N/A"
+        house_load_str = f"~{avg_load_w:.0f} W est" if avg_load_w else "—"
+        runtime_str = fmt_runtime(avg_load_w, usable_wh, " est") if avg_load_w else "N/A"
+
+    # Current solar power (latest panel watts) for the Solar System panel
+    solar_now = parsed[0][3] if parsed else 0
 
     # Disk status
     data_percent, data_class, data_label = get_disk_status(DB_DIR)
@@ -1004,12 +994,13 @@ def index():
         .dashboard {{
             display: grid;
             grid-template-columns: 1fr 1fr;
-            grid-template-rows: auto 1fr 1fr auto;
+            grid-template-rows: auto auto 1fr 1fr auto;
             gap: 6px;
             padding: 6px;
             flex: 1;
             overflow: hidden;
         }}
+        .panel-wide {{ grid-column: 1 / -1; }}
 
         .panel {{
             background: var(--bg-panel);
@@ -1171,22 +1162,26 @@ def index():
 </div>
 
 <div class="dashboard">
-    <!-- Solar Summary -->
+    <!-- Battery Array (listed first: the priority view on a phone at camp) -->
     <div class="panel">
-        <h2>Solar System</h2>
-        <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill {status_color}">{status_text}</span></span></div>
-        <div class="metric"><span class="metric-label">Voltage</span><span class="metric-value">{latest_voltage} <span class="pill {latest_voltage_class}">{latest_voltage_label}</span></span></div>
-        <div class="metric"><span class="metric-label">Avg / Max V</span><span class="metric-value">{average_voltage} / {max_voltage}</span></div>
-        <div class="metric"><span class="metric-label">State of Charge (SOC)</span><span class="metric-value">{soc_percent}% <span class="pill {soc_color}">{soc_label}</span></span></div>
-        <div class="metric"><span class="metric-label">Battery (BLE)</span><span class="metric-value">{batt_per_display}<span class="pill {batt_feed_class}">{batt_feed_label}</span></span></div>
-        <div class="metric"><span class="metric-label">Load (avg/max)</span><span class="metric-value">{average_load} / {max_load}</span></div>
-        <div class="metric"><span class="metric-label">Runtime Est.</span><span class="metric-value">{runtime_str}</span></div>
-        <div class="metric"><span class="metric-label">Starlink</span><span class="metric-value">{starlink_runtime_str}</span></div>
-        <div class="metric"><span class="metric-label">Panel (VPV)</span><span class="metric-value">{latest_vpv:.2f} V <span class="pill {vpv_color}">{vpv_message}</span></span></div>
+        <h2>Battery Array</h2>
+        <div class="metric"><span class="metric-label">SOC</span><span class="metric-value">{soc_percent}% <span class="pill {soc_color}">{soc_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Battery V</span><span class="metric-value">{latest_voltage} <span class="pill {latest_voltage_class}">{latest_voltage_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Battery feed</span><span class="metric-value">{batt_per_display}<span class="pill {batt_feed_class}">{batt_feed_label}</span></span></div>
+        <div class="metric"><span class="metric-label">House load</span><span class="metric-value">{house_load_str}</span></div>
+        <div class="metric"><span class="metric-label">Runtime</span><span class="metric-value">{runtime_str}</span></div>
     </div>
 
-    <!-- Pi Health -->
-    <div class="panel">"""
+    <!-- Solar System -->
+    <div class="panel">
+        <h2>Solar System</h2>
+        <div class="metric"><span class="metric-label">Solar data</span><span class="metric-value"><span class="pill {status_color}">{status_text}</span></span></div>
+        <div class="metric"><span class="metric-label">Solar power</span><span class="metric-value">{solar_now} W</span></div>
+        <div class="metric"><span class="metric-label">Panel V</span><span class="metric-value">{latest_vpv:.2f} V <span class="pill {vpv_color}">{vpv_message}</span></span></div>
+    </div>
+
+    <!-- Pi Health (full width below the two summary panels) -->
+    <div class="panel panel-wide">"""
 
     if pi_status_row:
         # Escape every Pi-reported field; the Pi controls these strings, so a
