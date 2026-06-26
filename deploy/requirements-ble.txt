@@ -1,0 +1,5 @@
+# Bluetooth dependency for renogy_ble.py — install into a Pi-side venv ONLY.
+# Deliberately kept OUT of the top-level requirements.txt so the Render server
+# build doesn't pull Bluetooth packages it never uses.
+# The renogybt package is vendored in the repo (patched), so it is not listed here.
+bleak

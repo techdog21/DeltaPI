@@ -52,6 +52,10 @@ FAN_MIN_DUTY = 20  # Minimum speed to reliably spin fan
 LOG_PATH = "/var/log/vedirect/solar_log.jsonl"
 ERROR_LOG = "/var/log/vedirect/vedirect_error.log"
 OFFSET_FILE = "/var/log/vedirect/sent_offset.txt"
+# Battery state written by renogy_ble.py (separate service). Merged into each
+# uploaded frame if present; the embedded `ts`/`healthy` let the dashboard show
+# whether the battery feed is live, stale, or down rather than trusting it blindly.
+BATTERY_STATE_PATH = "/var/log/vedirect/battery_state.json"
 POST_SECRET = os.environ.get("POST_SECRET")
 if not POST_SECRET:
     print("[FATAL] POST_SECRET environment variable is not set. Exiting.")
@@ -516,6 +520,32 @@ def backfill_from_archive():
     except Exception as e:
         log_error(f"[Backfill] Failed: {e}")
 
+def read_battery_state():
+    """Return a compact battery summary from battery_state.json (written by the
+    renogy_ble poller), or None if absent/unreadable. The embedded `ts` and
+    `healthy` flags let the dashboard judge freshness — we do not drop stale
+    data here, so a frozen feed shows up as 'stale' rather than vanishing."""
+    try:
+        with open(BATTERY_STATE_PATH) as f:
+            s = json.load(f)
+    except Exception:
+        return None
+    bank = s.get("bank") or {}
+    return {
+        "ts": s.get("timestamp"),
+        "healthy": s.get("healthy"),
+        "ok": s.get("ok_count"),
+        "total": s.get("total"),
+        "soc": bank.get("soc"),
+        "voltage": bank.get("voltage"),
+        "current": bank.get("current"),
+        "power": bank.get("power"),
+        "remaining_ah": bank.get("remaining_ah"),
+        "capacity_ah": bank.get("capacity_ah"),
+        "per": [{"soc": b.get("soc"), "current": b.get("current"), "temps_f": b.get("temps_f")}
+                for b in s.get("batteries", []) if b.get("ok")],
+    }
+
 # ------------------ Main ------------------ #
 def main():
     """
@@ -562,6 +592,9 @@ def main():
                     frame = read_frame(ser)
                     if frame:
                         frame["timestamp"] = datetime.now(timezone.utc).isoformat()
+                        battery = read_battery_state()
+                        if battery:
+                            frame["battery"] = battery  # measured SOC/load from the BLE poller
                         try:
                             with open(LOG_PATH, "a") as f:
                                 json.dump(frame, f)

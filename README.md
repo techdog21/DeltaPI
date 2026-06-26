@@ -33,7 +33,20 @@ The Raspberry Pi Zero is powered via a 12V-to-5V step-down converter and connect
 
 ## Runtime Estimation
 
-The MPPT controller reports only charge current, not house load, so runtime can't be read directly. Instead the server derives average consumption from an **energy balance** over a trailing 72-hour window — solar harvested (the controller's lifetime yield counter `H19`) minus the change in stored energy — then divides the usable charge (down to a ~10% floor) by that figure. The dashboard shows runtime at your recent average draw plus a Starlink-scenario line. For exact load metering, add a battery shunt (e.g. Victron SmartShunt).
+The MPPT controller reports only charge current, not house load, so runtime can't be read from it directly. Two sources, in priority order:
+
+1. **Measured (preferred)** — when the Bluetooth battery feed is live (see below), the dashboard uses the batteries' true coulomb-counted SOC and, while discharging, their actual net current as the real house load. Runtime = usable charge (down to a ~10% floor) ÷ measured load.
+2. **Estimated (fallback)** — if the battery feed is stale or offline, the server falls back to an **energy balance** over a trailing 72-hour window: solar harvested (the controller's lifetime yield counter `H19`) minus the change in voltage-based stored energy. Clearly labeled `(est)` on the dashboard.
+
+## Battery Monitoring (Bluetooth)
+
+The Renogy Pro smart batteries (e.g. `RBT12100LFP-BT`) expose true SOC, current, voltage, temperature, and per-cell voltages over Bluetooth. `renogy_ble.py` runs as its own systemd service (`renogy_ble`), polling each battery every ~60 s (connect → read → disconnect) and writing `/var/log/vedirect/battery_state.json`. The main logger merges that file into its uploads, so the dashboard shows **measured** SOC/load and a **battery-feed health pill** (🟢 Live / 🟡 Stale / 🔴 Offline) — if the feed breaks you see it immediately instead of trusting old numbers.
+
+Implementation notes:
+- Uses a **vendored, patched** copy of [`cyrils/renogy-bt`](https://github.com/cyrils/renogy-bt) in `renogybt/` — patched so the Pro batteries' duplicate GATT characteristic UUIDs don't break the notify subscription.
+- Runs in a **separate venv** on the Pi (`deploy/requirements-ble.txt` → `bleak`); deliberately **not** in the top-level `requirements.txt`, so the Render server never builds Bluetooth packages.
+- Setup: install the venv + deps, edit the battery MAC addresses/aliases at the top of `renogy_ble.py`, then install `deploy/renogy_ble.service`. The Pi's `bluetooth` service must be enabled (`sudo systemctl enable --now bluetooth`).
+- One battery BLE connection at a time: while the Pi is polling, the Renogy phone app may not connect (and vice-versa).
 
 ## Environment Variables
 

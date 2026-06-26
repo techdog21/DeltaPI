@@ -1,0 +1,27 @@
+# DeltaPI Renogy battery BLE poller — systemd unit.
+# Reads the Renogy Pro smart batteries over Bluetooth and writes
+# /var/log/vedirect/battery_state.json, which vedirect_logger.py merges into its
+# uploads. Runs separately so Bluetooth issues never affect serial logging.
+#
+# Install on the Pi (adjust User and paths to match your setup — README uses pi):
+#   python3 -m venv /home/pi/deltapi-venv
+#   /home/pi/deltapi-venv/bin/pip install -r /home/pi/deltapi/deploy/requirements-ble.txt
+#   sudo cp deploy/renogy_ble.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now renogy_ble
+#
+# Edit the battery MAC addresses / aliases at the top of renogy_ble.py first.
+[Unit]
+Description=DeltaPI Renogy Battery BLE Poller
+After=bluetooth.service network-online.target
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/deltapi
+ExecStart=/home/pi/deltapi-venv/bin/python /home/pi/deltapi/renogy_ble.py
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

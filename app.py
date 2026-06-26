@@ -784,8 +784,50 @@ def index():
     except Exception:
         latest_voltage_class, latest_voltage_label = ("green", "Charging") if is_charging else ("gray", "Unknown")
 
-    # SOC
-    if parsed:
+    # ---- Measured battery data (from the BLE poller, embedded by the logger) ----
+    # Prefer real coulomb-counted SOC / load when the feed is live; otherwise fall
+    # back to the voltage-based estimate, clearly labeled. The feed's own ts/healthy
+    # drive a health pill so a broken poller is visible rather than silently trusted.
+    battery = None
+    if rows:
+        try:
+            battery = json.loads(rows[0][2]).get("battery")
+        except Exception:
+            battery = None
+    batt_age_s = None
+    if battery and battery.get("ts"):
+        try:
+            batt_age_s = (datetime.now(timezone.utc) - ensure_utc(datetime.fromisoformat(battery["ts"]))).total_seconds()
+        except Exception:
+            batt_age_s = None
+
+    def _age_str(sec):
+        sec = int(sec)
+        return f"{sec}s ago" if sec < 90 else f"{humanize_minutes(sec / 60)} ago"
+
+    batt_live = bool(battery and batt_age_s is not None and batt_age_s < 180
+                     and battery.get("healthy") and battery.get("soc") is not None)
+    if not battery or batt_age_s is None:
+        batt_feed_class, batt_feed_label = "gray", "No feed"
+    elif batt_age_s >= 600:
+        batt_feed_class, batt_feed_label = "red", f"Offline ({_age_str(batt_age_s)})"
+    elif batt_age_s >= 180:
+        batt_feed_class, batt_feed_label = "yellow", f"Stale ({_age_str(batt_age_s)})"
+    elif not battery.get("healthy"):
+        batt_feed_class, batt_feed_label = "yellow", f"Degraded {battery.get('ok')}/{battery.get('total')}"
+    else:
+        batt_feed_class, batt_feed_label = "green", f"Live ({_age_str(batt_age_s)})"
+
+    batt_per_str = ""
+    if battery and battery.get("per"):
+        batt_per_str = " / ".join(f"{p.get('soc')}%" for p in battery["per"] if p.get("soc") is not None)
+    batt_per_display = f"{batt_per_str} " if (batt_live and batt_per_str) else ""
+
+    # SOC — measured when the feed is live, else voltage estimate
+    if batt_live:
+        soc_percent = battery["soc"]
+        soc_color, soc_label = soc_pill(soc_percent)
+    elif parsed:
         voltage_float = voltages[0]
         soc_percent = estimate_soc(voltage_float)
         if is_charging:
@@ -795,25 +837,34 @@ def index():
     else:
         soc_percent, soc_color, soc_label = 0, "gray", "Unknown"
 
-    # Runtime estimates. The MPPT reports only charge current, never house load,
-    # so runtime is based on the empirically measured average draw (energy
-    # balance over the last few days) against the usable charge on hand down to
-    # the planning floor. Two figures: at your recent typical draw, and a
-    # worst-case "Starlink running" scenario.
+    # Runtime. With a live battery feed we have true SOC and (when discharging)
+    # true load, so runtime is measured. Otherwise fall back to the energy-balance
+    # estimate against the voltage-based SOC.
     avg_load_w = estimate_avg_load_w(conn, now) if parsed else None
-    usable_wh = BATTERY_CAPACITY_WH * max(0, soc_percent - SOC_FLOOR) / 100 if parsed else 0
     charging_note = " (charging — SOC reads high)" if is_charging else ""
 
-    if avg_load_w and usable_wh > 0:
-        runtime_str = f"{estimate_runtime_wh(avg_load_w, usable_wh)} @ ~{avg_load_w:.0f}W avg{charging_note}"
+    if batt_live:
+        v = battery.get("voltage") or 0
+        usable_wh = max(0, ((battery.get("remaining_ah") or 0) - (battery.get("capacity_ah") or 0) * SOC_FLOOR / 100) * v)
+        net_w = battery.get("power") or 0  # signed: + charging, - discharging
+        if net_w < -0.5:  # discharging — this is the real measured house load
+            load_w = -net_w
+            runtime_str = f"{estimate_runtime_wh(load_w, usable_wh)} @ {load_w:.0f}W (measured)"
+        elif avg_load_w:
+            runtime_str = f"{estimate_runtime_wh(avg_load_w, usable_wh)} @ ~{avg_load_w:.0f}W avg (charging)"
+        else:
+            runtime_str = "Charging / idle"
+        starlink_runtime_str = f"{estimate_runtime_wh(STARLINK_W, usable_wh)} @ {STARLINK_W}W"
     else:
-        runtime_str = "N/A"
-
-    # Starlink scenario: usable charge at the measured active-Starlink draw.
-    if parsed and usable_wh > 0:
-        starlink_runtime_str = f"{estimate_runtime_wh(STARLINK_W, usable_wh)} @ {STARLINK_W}W{charging_note}"
-    else:
-        starlink_runtime_str = "N/A"
+        usable_wh = BATTERY_CAPACITY_WH * max(0, soc_percent - SOC_FLOOR) / 100 if parsed else 0
+        if avg_load_w and usable_wh > 0:
+            runtime_str = f"{estimate_runtime_wh(avg_load_w, usable_wh)} @ ~{avg_load_w:.0f}W avg (est){charging_note}"
+        else:
+            runtime_str = "N/A"
+        if parsed and usable_wh > 0:
+            starlink_runtime_str = f"{estimate_runtime_wh(STARLINK_W, usable_wh)} @ {STARLINK_W}W (est){charging_note}"
+        else:
+            starlink_runtime_str = "N/A"
 
     # Disk status
     data_percent, data_class, data_label = get_disk_status(DB_DIR)
@@ -1127,6 +1178,7 @@ def index():
         <div class="metric"><span class="metric-label">Voltage</span><span class="metric-value">{latest_voltage} <span class="pill {latest_voltage_class}">{latest_voltage_label}</span></span></div>
         <div class="metric"><span class="metric-label">Avg / Max V</span><span class="metric-value">{average_voltage} / {max_voltage}</span></div>
         <div class="metric"><span class="metric-label">State of Charge (SOC)</span><span class="metric-value">{soc_percent}% <span class="pill {soc_color}">{soc_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Battery (BLE)</span><span class="metric-value">{batt_per_display}<span class="pill {batt_feed_class}">{batt_feed_label}</span></span></div>
         <div class="metric"><span class="metric-label">Load (avg/max)</span><span class="metric-value">{average_load} / {max_load}</span></div>
         <div class="metric"><span class="metric-label">Runtime Est.</span><span class="metric-value">{runtime_str}</span></div>
         <div class="metric"><span class="metric-label">Starlink</span><span class="metric-value">{starlink_runtime_str}</span></div>
