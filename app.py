@@ -667,18 +667,19 @@ def index():
         parsed_chrono = list(reversed(parsed))
         table_data = parsed_chrono[-5:] if len(parsed_chrono) > 5 else parsed_chrono
         latest_vpv = parsed[0][4]
+        # Panel VOLTAGE only indicates electrical status, NOT sunlight — panels hold
+        # high voltage even in clouds/rain while producing almost no power. Actual
+        # sun/production is the power-based "Solar power" pill, not this.
         vpv_message = (
-            "Nighttime" if latest_vpv < 5 else
-            "Good Sunlight" if 16 <= latest_vpv <= 45 else
+            "Night" if latest_vpv < 5 else
             "Over-Voltage" if latest_vpv > 45 else
-            "Cloudy"
+            "Nominal"
         )
 
     vpv_color = (
         "gray" if latest_vpv < 5 else
-        "green" if 16 <= latest_vpv <= 45 else
         "red" if latest_vpv > 45 else
-        "yellow"
+        "gray"
     )
 
     existing_days = conn.execute("SELECT COUNT(DISTINCT DATE(timestamp)) FROM logs").fetchone()[0]
@@ -813,6 +814,10 @@ def index():
 
     batt_live = bool(battery and batt_age_s is not None and batt_age_s < 180
                      and battery.get("healthy") and battery.get("soc") is not None)
+    # Any measured reading (live OR stale). When present we always show the last
+    # measured numbers (with a freshness pill), never the blunt energy-balance
+    # estimate — that's only a last resort when there's no feed data at all.
+    batt_present = bool(battery and battery.get("soc") is not None)
     if not battery or batt_age_s is None:
         batt_feed_class, batt_feed_label = "gray", "No feed"
     elif batt_age_s >= 600:
@@ -834,10 +839,10 @@ def index():
                 name = p.get("id") or p.get("label")
                 parts.append(f"{name}:{p['soc']}%" if name else f"{p['soc']}%")
         batt_per_str = " ".join(parts)
-    batt_per_display = f"{batt_per_str} " if (batt_live and batt_per_str) else ""
+    batt_per_display = f"{batt_per_str} " if (batt_present and batt_per_str) else ""
 
-    # SOC — measured when the feed is live, else voltage estimate
-    if batt_live:
+    # SOC — measured whenever we have a reading (live or stale), else voltage estimate
+    if batt_present:
         soc_percent = battery["soc"]
         soc_color, soc_label = soc_pill(soc_percent)
     elif parsed:
@@ -854,7 +859,7 @@ def index():
     # computed as MPPT output power minus the battery's net power (valid whether
     # charging or discharging). Without the feed, fall back to the energy-balance
     # estimate (tagged "est").
-    if batt_live:
+    if batt_present:
         v = battery.get("voltage") or 0
         usable_wh = max(0, ((battery.get("remaining_ah") or 0)
                             - (battery.get("capacity_ah") or 0) * SOC_FLOOR / 100) * v)
@@ -1148,9 +1153,13 @@ def index():
             .chart-panel {{ min-height: 200px; }}
             .header {{ flex-wrap: wrap; gap: 6px; }}
             .header h1 {{ font-size: 13px; }}
-            /* stop the controls flowing off-screen: full-width row that wraps */
-            .header-controls {{ flex-wrap: wrap; gap: 6px; width: 100%; }}
-            .header form {{ flex-wrap: wrap; }}
+            /* compact controls so they fit on one line (wrap only as a safety) */
+            .header-controls {{ flex-wrap: wrap; gap: 4px; width: 100%; }}
+            .header form {{ gap: 4px; }}
+            .header button, .theme-toggle {{ padding: 3px 6px; font-size: 10px; }}
+            .header input[type="number"] {{ width: 38px; padding: 2px 4px; font-size: 10px; }}
+            .header label {{ font-size: 10px; }}
+            #autoRefresh {{ padding: 3px 4px !important; font-size: 10px; }}
             /* let long values (battery feed, wifi) wrap instead of forcing width */
             .metric {{ font-size: 11px; flex-wrap: wrap; }}
             .metric-value {{ font-size: 11px; word-break: break-word; text-align: right; }}
@@ -1177,7 +1186,7 @@ def index():
             <input type="hidden" id="tokenInput" name="token">
             <button type="submit">Update</button>
         </form>
-        <button class="theme-toggle" onclick="toggleTheme()">Light/Dark</button>
+        <button class="theme-toggle" onclick="toggleTheme()">Theme</button>
         <button class="theme-toggle" onclick="location.reload()">Refresh</button>
         <select id="autoRefresh" class="theme-toggle" onchange="setAutoRefresh(this.value)" style="padding:4px 6px;">
             <option value="0">Auto: Off</option>
