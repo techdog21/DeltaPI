@@ -897,7 +897,8 @@ def index():
                             - (battery.get("capacity_ah") or 0) * SOC_FLOOR / 100) * v)
         mppt_out_w = voltages[0] * currents[0] if parsed else 0
         house_load_w = max(0, mppt_out_w - (battery.get("power") or 0))  # true house load
-        house_load_str = f"{house_load_w:.0f} W"
+        house_load_a = house_load_w / v if v else 0
+        house_load_str = f"{house_load_w:.0f} W ({house_load_a:.1f} A)"
         runtime_str = fmt_runtime(house_load_w, usable_wh)
     else:
         avg_load_w = estimate_avg_load_w(conn, now) if parsed else None
@@ -907,6 +908,7 @@ def index():
 
     # Current solar power (latest panel watts) for the Solar System panel
     solar_now = parsed[0][3] if parsed else 0
+    charge_now_a = currents[0] if parsed else 0  # MPPT charge current into the battery (A)
     # Solar has no "bad" state, so color only conveys producing (green) vs off
     # (gray); the label carries the magnitude.
     solar_class, solar_label = make_status_pill(solar_now, [
@@ -1313,6 +1315,7 @@ def index():
         <div class="metric"><span class="metric-label">Controller</span><span class="metric-value"><span class="pill {ctrl_class}">{ctrl_label}</span></span></div>
         <div class="metric"><span class="metric-label">Mode</span><span class="metric-value"><span class="pill {mode_class}">{mode_label}</span></span></div>
         <div class="metric"><span class="metric-label">Solar power</span><span class="metric-value">{solar_now} W <span class="pill {solar_class}">{solar_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Charge current</span><span class="metric-value">{charge_now_a:.1f} A</span></div>
         <div class="metric"><span class="metric-label">Yield today</span><span class="metric-value">{today_yield:.2f} kWh</span></div>
         <div class="metric"><span class="metric-label">Panel V</span><span class="metric-value">{latest_vpv:.2f} V <span class="pill {vpv_color}">{vpv_message}</span></span></div>
     </div>
