@@ -1825,10 +1825,20 @@ def index():
                 <tr><td>{fmt_mt(ts)}</td><td>{v}</td><td>{i}</td><td>{power}</td>
                 <td>{vpv}</td><td>{escape(load)}</td><td>{escape(cs)}</td><td>{h20}</td><td>{h21}</td></tr>"""
 
+    chart_payload = {
+        "timestamps": timestamps, "powers": powers, "charge_powers": charge_powers,
+        "voltage_timestamps": voltage_timestamps, "voltage_values": voltage_values,
+        "h20_days": h20_days, "h20_values": h20_values, "h20_ymax": h20_ymax,
+        "batt_times": batt_times, "batt_soc_values": batt_soc_values,
+        "batt_load_values": batt_load_values, "batt_temp_values": batt_temp_values,
+        "cons_days": cons_days, "cons_values": cons_values,
+        "SOC_DANGER": SOC_DANGER, "FREEZE_F": FREEZE_F,
+    }
     html += f"""
             </tbody>
         </table>
     </div>
+    <script id="dash-data" type="application/json">{json.dumps(chart_payload)}</script>
 </div>
 
 <script>
@@ -1851,13 +1861,28 @@ function toggleTheme() {{
     location.reload();
 }}
 
+// Live in-place refresh: fetch the page, swap only the .dashboard contents (the
+// header/controls live outside it, so the dropdown/scroll are untouched), then
+// rebuild the charts from the fresh data island. No full reload -> no flash.
+function refreshDashboard() {{
+    fetch(window.location.pathname + window.location.search, {{ cache: 'no-store' }})
+        .then(function(r) {{ return r.text(); }})
+        .then(function(html) {{
+            var doc = new DOMParser().parseFromString(html, 'text/html');
+            var fresh = doc.querySelector('.dashboard');
+            var cur = document.querySelector('.dashboard');
+            if (fresh && cur) {{ cur.innerHTML = fresh.innerHTML; initCharts(); }}
+        }})
+        .catch(function() {{}});
+}}
+
 var _refreshTimer = null;
 function setAutoRefresh(seconds) {{
     if (_refreshTimer) clearInterval(_refreshTimer);
     _refreshTimer = null;
     localStorage.setItem('autoRefresh', seconds);
     if (seconds > 0) {{
-        _refreshTimer = setInterval(function() {{ location.reload(); }}, seconds * 1000);
+        _refreshTimer = setInterval(refreshDashboard, seconds * 1000);
     }}
 }}
 (function() {{
@@ -1867,110 +1892,43 @@ function setAutoRefresh(seconds) {{
     if (parseInt(saved) > 0) setAutoRefresh(parseInt(saved));
 }})();
 
-// Read CSS variable values for chart colors
-var style = getComputedStyle(document.documentElement);
-var gridColor = style.getPropertyValue('--grid-color').trim();
-var textMuted = style.getPropertyValue('--text-muted').trim();
-
-const chartOpts = (yMin, yMax, stepSize) => ({{
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: false,
-    plugins: {{ legend: {{ display: false }} }},
-    elements: {{ point: {{ radius: 0 }}, line: {{ borderWidth: 1.5 }} }},
-    scales: {{
-        x: {{ display: false }},
-        y: {{ min: yMin, max: yMax, ticks: {{ stepSize: stepSize, font: {{ size: 9 }}, color: textMuted }}, grid: {{ color: gridColor }} }}
-    }}
-}});
-
-// Solar Power
-new Chart(document.getElementById('chartPower'), {{
-    type: 'line',
-    data: {{
-        labels: {json.dumps(timestamps)},
-        datasets: [{{ data: {json.dumps(powers)}, borderColor: style.getPropertyValue('--chart-power').trim(), fill: false, tension: 0.1 }}]
-    }},
-    options: chartOpts(0, 305, 50)
-}});
-
-// Battery Voltage
-new Chart(document.getElementById('chartVoltage'), {{
-    type: 'line',
-    data: {{
-        labels: {json.dumps(voltage_timestamps)},
-        datasets: [{{ data: {json.dumps(voltage_values)}, borderColor: style.getPropertyValue('--chart-voltage').trim(), backgroundColor: style.getPropertyValue('--chart-voltage-fill').trim(), fill: true, tension: 0.3, spanGaps: false }}]
-    }},
-    options: chartOpts(12.5, 14.6, 0.5)
-}});
-
-// Daily Energy H20 (solar production; scaled to data)
-new Chart(document.getElementById('chartH20'), {{
-    type: 'line',
-    data: {{
-        labels: {json.dumps(h20_days)},
-        datasets: [
-            {{ data: {json.dumps(h20_values)}, borderColor: style.getPropertyValue('--chart-h20').trim(), backgroundColor: style.getPropertyValue('--chart-h20-fill').trim(), fill: true, tension: 0.2, pointRadius: 2 }}
-        ]
-    }},
-    options: chartOpts(0, {h20_ymax}, {round(h20_ymax / 4, 2)})
-}});
-
-// Battery SOC (measured) with a red danger floor at {SOC_DANGER}%
-new Chart(document.getElementById('chartSOC'), {{
-    type: 'line',
-    data: {{
-        labels: {json.dumps(batt_times)},
-        datasets: [
-            {{ data: {json.dumps(batt_soc_values)}, borderColor: style.getPropertyValue('--chart-voltage').trim(), backgroundColor: style.getPropertyValue('--chart-voltage-fill').trim(), fill: true, tension: 0.3, pointRadius: 0 }},
-            {{ data: Array({len(batt_times)}).fill({SOC_DANGER}), borderColor: style.getPropertyValue('--pill-red').trim(), borderDash: [4,3], fill: false, pointRadius: 0 }}
-        ]
-    }},
-    options: chartOpts(0, 100, 20)
-}});
-
-// House Load (measured, W)
-new Chart(document.getElementById('chartLoad'), {{
-    type: 'line',
-    data: {{
-        labels: {json.dumps(batt_times)},
-        datasets: [{{ data: {json.dumps(batt_load_values)}, borderColor: style.getPropertyValue('--chart-power').trim(), fill: false, tension: 0.2, pointRadius: 0 }}]
-    }},
-    options: chartOpts(0, null, null)
-}});
-
-// Charge Power to battery (MPPT output, W)
-new Chart(document.getElementById('chartCharge'), {{
-    type: 'line',
-    data: {{
-        labels: {json.dumps(timestamps)},
-        datasets: [{{ data: {json.dumps(charge_powers)}, borderColor: style.getPropertyValue('--chart-h21-border').trim(), fill: false, tension: 0.1 }}]
-    }},
-    options: chartOpts(0, null, null)
-}});
-
-// Battery Temperature (measured, °F) with a red freezing line at {FREEZE_F}°F
-new Chart(document.getElementById('chartTemp'), {{
-    type: 'line',
-    data: {{
-        labels: {json.dumps(batt_times)},
-        datasets: [
-            {{ data: {json.dumps(batt_temp_values)}, borderColor: style.getPropertyValue('--chart-power').trim(), fill: false, tension: 0.3, pointRadius: 0, spanGaps: true }},
-            {{ data: Array({len(batt_times)}).fill({FREEZE_F}), borderColor: style.getPropertyValue('--pill-red').trim(), borderDash: [4,3], fill: false, pointRadius: 0 }}
-        ]
-    }},
-    options: chartOpts(null, null, null)
-}});
-
-// Daily Consumption (measured, kWh)
-new Chart(document.getElementById('chartConsDaily'), {{
-    type: 'bar',
-    data: {{
-        labels: {json.dumps(cons_days)},
-        datasets: [{{ data: {json.dumps(cons_values)}, backgroundColor: style.getPropertyValue('--chart-h21').trim(), borderColor: style.getPropertyValue('--chart-power').trim(), borderWidth: 1 }}]
-    }},
-    options: chartOpts(0, null, null)
-}});
+// ---- Charts: rebuilt from the #dash-data JSON island so AJAX refresh can redraw them ----
+var _charts = [];
+function initCharts() {{
+    var el = document.getElementById('dash-data');
+    if (!el || typeof Chart === 'undefined') return;
+    var D = JSON.parse(el.textContent);
+    var style = getComputedStyle(document.documentElement);
+    var gridColor = style.getPropertyValue('--grid-color').trim();
+    var textMuted = style.getPropertyValue('--text-muted').trim();
+    var cv = function(n) {{ return style.getPropertyValue(n).trim(); }};
+    var chartOpts = function(yMin, yMax, stepSize) {{ return {{
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: {{ legend: {{ display: false }} }},
+        elements: {{ point: {{ radius: 0 }}, line: {{ borderWidth: 1.5 }} }},
+        scales: {{ x: {{ display: false }},
+            y: {{ min: yMin, max: yMax, ticks: {{ stepSize: stepSize, font: {{ size: 9 }}, color: textMuted }}, grid: {{ color: gridColor }} }} }}
+    }}; }};
+    var flat = function(arr, val) {{ return arr.map(function() {{ return val; }}); }};
+    _charts.forEach(function(c) {{ c.destroy(); }});
+    _charts = [];
+    function mk(id, cfg) {{ var e = document.getElementById(id); if (e) _charts.push(new Chart(e, cfg)); }}
+    mk('chartPower', {{ type: 'line', data: {{ labels: D.timestamps, datasets: [{{ data: D.powers, borderColor: cv('--chart-power'), fill: false, tension: 0.1 }}] }}, options: chartOpts(0, 305, 50) }});
+    mk('chartVoltage', {{ type: 'line', data: {{ labels: D.voltage_timestamps, datasets: [{{ data: D.voltage_values, borderColor: cv('--chart-voltage'), backgroundColor: cv('--chart-voltage-fill'), fill: true, tension: 0.3, spanGaps: false }}] }}, options: chartOpts(12.5, 14.6, 0.5) }});
+    mk('chartH20', {{ type: 'line', data: {{ labels: D.h20_days, datasets: [{{ data: D.h20_values, borderColor: cv('--chart-h20'), backgroundColor: cv('--chart-h20-fill'), fill: true, tension: 0.2, pointRadius: 2 }}] }}, options: chartOpts(0, D.h20_ymax, D.h20_ymax / 4) }});
+    mk('chartSOC', {{ type: 'line', data: {{ labels: D.batt_times, datasets: [
+        {{ data: D.batt_soc_values, borderColor: cv('--chart-voltage'), backgroundColor: cv('--chart-voltage-fill'), fill: true, tension: 0.3, pointRadius: 0 }},
+        {{ data: flat(D.batt_times, D.SOC_DANGER), borderColor: cv('--pill-red'), borderDash: [4,3], fill: false, pointRadius: 0 }}
+    ] }}, options: chartOpts(0, 100, 20) }});
+    mk('chartLoad', {{ type: 'line', data: {{ labels: D.batt_times, datasets: [{{ data: D.batt_load_values, borderColor: cv('--chart-power'), fill: false, tension: 0.2, pointRadius: 0 }}] }}, options: chartOpts(0, null, null) }});
+    mk('chartCharge', {{ type: 'line', data: {{ labels: D.timestamps, datasets: [{{ data: D.charge_powers, borderColor: cv('--chart-h21-border'), fill: false, tension: 0.1 }}] }}, options: chartOpts(0, null, null) }});
+    mk('chartTemp', {{ type: 'line', data: {{ labels: D.batt_times, datasets: [
+        {{ data: D.batt_temp_values, borderColor: cv('--chart-power'), fill: false, tension: 0.3, pointRadius: 0, spanGaps: true }},
+        {{ data: flat(D.batt_times, D.FREEZE_F), borderColor: cv('--pill-red'), borderDash: [4,3], fill: false, pointRadius: 0 }}
+    ] }}, options: chartOpts(null, null, null) }});
+    mk('chartConsDaily', {{ type: 'bar', data: {{ labels: D.cons_days, datasets: [{{ data: D.cons_values, backgroundColor: cv('--chart-h21'), borderColor: cv('--chart-power'), borderWidth: 1 }}] }}, options: chartOpts(0, null, null) }});
+}}
+initCharts();
 </script>
 </body>
 </html>"""
