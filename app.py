@@ -1078,11 +1078,21 @@ def index():
     dlat, dlon = (starlink or {}).get("lat"), (starlink or {}).get("lon")
     if dlat is not None:
         wx_lat, wx_lon = dlat, dlon                      # dish sharing GPS (Mini on the road)
-    elif (HOME_DISH_ID and dish_id == HOME_DISH_ID) or not HOME_DISH_ID:
-        wx_lat, wx_lon = HOME_LAT, HOME_LON              # home dish (or unconfigured) -> home coords
+    elif HOME_DISH_ID and dish_id and dish_id != HOME_DISH_ID:
+        wx_lat = wx_lon = None                           # positively roaming on a no-GPS dish
     else:
-        wx_lat = wx_lon = None                           # roaming on a no-GPS dish -> unknown
+        wx_lat, wx_lon = HOME_LAT, HOME_LON              # home / can't tell -> home coords
     wx = get_weather(wx_lat, wx_lon)
+    if request.args.get("debug") == "weather":
+        return jsonify({
+            "home_coords_set": HOME_LAT is not None and HOME_LON is not None,
+            "home_dish_id_set": bool(HOME_DISH_ID),
+            "starlink_in_frame": starlink is not None,
+            "dish_id": dish_id,
+            "dish_id_matches_home": bool(HOME_DISH_ID and dish_id == HOME_DISH_ID),
+            "dish_has_gps": dlat is not None,
+            "weather_fetched": wx is not None,
+        })
     if wx:
         cur = wx.get("current") or {}
         daily = wx.get("daily") or {}
