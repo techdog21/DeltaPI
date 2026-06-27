@@ -909,6 +909,49 @@ def index():
     else:
         ctrl_class, ctrl_label = "gray", "Unknown"
 
+    # Battery temperature, cell balance, time-to-full (from the measured feed)
+    batt_temps, batt_deltas = [], []
+    for p in (battery.get("per") if battery else None) or []:
+        if p.get("ok"):
+            batt_temps += [t for t in (p.get("temps_f") or []) if isinstance(t, (int, float))]
+            if p.get("cell_delta") is not None:
+                batt_deltas.append(p["cell_delta"])
+
+    if batt_present and batt_temps:
+        tmin, tmax = min(batt_temps), max(batt_temps)
+        batt_temp_str = f"{tmax:.0f}°F"
+        if tmin < 32:      # LiFePO4 must not charge below freezing
+            btemp_class, btemp_label = "red", "Too cold to charge"
+        elif tmin < 40:
+            btemp_class, btemp_label = "yellow", "Cold"
+        elif tmax > 113:   # ~45°C
+            btemp_class, btemp_label = "red", "Hot"
+        else:
+            btemp_class, btemp_label = "green", "OK"
+    else:
+        batt_temp_str, btemp_class, btemp_label = "—", "gray", "n/a"
+
+    if batt_present and batt_deltas:
+        dmax = max(batt_deltas)
+        if dmax >= 0.10:
+            cell_class, cell_label = "red", f"{dmax:.2f}V spread"
+        elif dmax >= 0.05:
+            cell_class, cell_label = "yellow", f"{dmax:.2f}V spread"
+        else:
+            cell_class, cell_label = "green", "Balanced"
+    else:
+        cell_class, cell_label = "gray", "—"
+
+    ttf_str = "—"
+    if batt_present and battery:
+        cur = battery.get("current") or 0   # bank net current, + = charging
+        rem = battery.get("remaining_ah") or 0
+        cap = battery.get("capacity_ah") or 0
+        if cur > 0.2 and cap > rem:
+            ttf_str = humanize_minutes((cap - rem) / cur * 60)
+        elif soc_percent and soc_percent >= 99:
+            ttf_str = "Full"
+
     # Disk status
     data_percent, data_class, data_label = get_disk_status(DB_DIR)
 
@@ -1233,8 +1276,11 @@ def index():
         <div class="metric"><span class="metric-label">SOC</span><span class="metric-value">{soc_percent}% <span class="pill {soc_color}">{soc_label}</span></span></div>
         <div class="metric"><span class="metric-label">Battery V</span><span class="metric-value">{latest_voltage} <span class="pill {latest_voltage_class}">{latest_voltage_label}</span></span></div>
         <div class="metric"><span class="metric-label">Battery feed</span><span class="metric-value">{batt_per_display}<span class="pill {batt_feed_class}">{batt_feed_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Temperature</span><span class="metric-value">{batt_temp_str} <span class="pill {btemp_class}">{btemp_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Cell balance</span><span class="metric-value"><span class="pill {cell_class}">{cell_label}</span></span></div>
         <div class="metric"><span class="metric-label">Consumption</span><span class="metric-value">{house_load_str}</span></div>
         <div class="metric"><span class="metric-label">Runtime</span><span class="metric-value">{runtime_str}</span></div>
+        <div class="metric"><span class="metric-label">Time to full</span><span class="metric-value">{ttf_str}</span></div>
     </div>
 
     <!-- Solar System -->

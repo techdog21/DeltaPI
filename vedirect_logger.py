@@ -543,7 +543,9 @@ def read_battery_state():
         "remaining_ah": bank.get("remaining_ah"),
         "capacity_ah": bank.get("capacity_ah"),
         "per": [{"id": b.get("id"), "ok": b.get("ok"), "soc": b.get("soc"),
-                 "current": b.get("current"), "temps_f": b.get("temps_f")}
+                 "current": b.get("current"), "temps_f": b.get("temps_f"),
+                 "cell_delta": (round(max(b["cells_v"]) - min(b["cells_v"]), 3)
+                                if b.get("cells_v") else None)}
                 for b in s.get("batteries", [])],
     }
 

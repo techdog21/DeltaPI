@@ -14,12 +14,23 @@ The Raspberry Pi Zero is powered via a 12V-to-5V step-down converter and connect
 
 ## Dashboard Features
 
-- Real-time solar system summary: voltage, SOC, load, runtime estimates
-- Raspberry Pi health: CPU temp, fan speed, Wi-Fi signal, disk/memory, OS updates
-- Four Chart.js visualizations: Solar Power, Battery Voltage, Daily Energy (H20), Daily Peak Power (H21)
-- Latest readings table
-- Light/dark theme toggle with cookie persistence
-- Responsive layout for desktop and mobile (iPhone compatible)
+Three summary panels plus charts and a readings table:
+
+- **Battery Array** (measured over Bluetooth): SOC, battery voltage, per-battery
+  feed health pill, temperature (with a LiFePO4 cold-charge warning), cell balance,
+  consumption, runtime, and time-to-full.
+- **Solar System**: data-freshness, controller health (from the VE.Direct `ERR`
+  code), charge mode (Bulk/Absorption/Float), solar power, and panel voltage.
+- **Pi Health**: serial link, OS, uptime, last check-in, CPU/fan, updates,
+  memory/disk, Wi-Fi, container disk.
+- **Charts** (Chart.js): Solar Power (W), Battery Voltage (V), Daily Energy (kWh),
+  Battery SOC (%) with a red danger floor, and Consumption (W).
+- Latest readings table, light/dark theme toggle (cookie-persisted), and a
+  responsive layout that stacks to a single scrolling column on iPhone.
+
+Status pills follow a consistent meaning — green = good, yellow = warning,
+red = problem, gray = informational/idle — except solar production (no "bad"
+state: green = producing, gray = off).
 
 ## Architecture
 
