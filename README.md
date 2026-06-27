@@ -15,7 +15,8 @@ to a small Flask app on Render.com, which renders a fast, mobile-friendly dashbo
 | **Victron MPPT** (SmartSolar) | VE.Direct over USB serial | Solar power, panel voltage, charge current, charge mode, daily/lifetime yield, controller errors |
 | **Renogy Pro batteries** (`RBT12100LFP-BT`) | Bluetooth LE (BMS) | True coulomb-counted SOC, current, voltage, temperature, per-cell voltages |
 | **Starlink dish** (round + Mini) | local gRPC API (`192.168.100.1:9200`) | Connection status, obstruction %, alerts, throughput, latency, GPS location |
-| **Open-Meteo** | server-side HTTP (free, no key) | Current conditions, cloud cover, solar-radiation forecast |
+| **Open-Meteo** | server-side HTTP (free, no key) | Current conditions, cloud cover, solar-radiation forecast, sunrise/sunset, air quality (US AQI + PM2.5) |
+| **NWS** (`api.weather.gov`) | server-side HTTP (free, US only) | Active severe-weather watches/warnings for the current location |
 
 The MPPT only measures *charge* current, never house load — so consumption and
 runtime are derived from the **batteries' measured net current** (see
@@ -23,7 +24,7 @@ runtime are derived from the **batteries' measured net current** (see
 
 ## Dashboard
 
-Five info panels, eight charts, and a readings table. Status pills are consistent:
+Six info panels (an even 3×2 grid), eight charts, and a readings table. Status pills are consistent:
 **green = good, yellow = warning, red = problem, gray = informational/idle** (except
 solar production, which has no "bad" state — green = producing, gray = off).
 
@@ -39,6 +40,9 @@ solar production, which has no "bad" state — green = producing, gray = off).
   roaming, water…), throughput, latency.
 - **Weather**: current conditions, cloud cover, tomorrow's charging outlook, freeze
   warning. Located from the dish's GPS, or a configured home fallback.
+- **Environment**: severe-weather alert (NWS watches/warnings — storm/wind/flood/fire),
+  air quality (US AQI + PM2.5 as a wildfire-smoke proxy), and today's solar window
+  (sunrise–sunset + hours of sun left).
 - **Pi Health**: serial link, OS, uptime, last check-in, CPU/fan, updates, mem/disk,
   Wi-Fi, container disk.
 - **Charts** (Chart.js): Solar Power, Battery Voltage, Daily Energy (kWh), Battery SOC

@@ -365,7 +365,7 @@ def get_weather(lat, lon):
         resp = requests.get("https://api.open-meteo.com/v1/forecast", params={
             "latitude": lat, "longitude": lon,
             "current": "temperature_2m,cloud_cover,weather_code",
-            "daily": "weather_code,temperature_2m_min,shortwave_radiation_sum",
+            "daily": "weather_code,temperature_2m_min,shortwave_radiation_sum,sunrise,sunset",
             "temperature_unit": "fahrenheit", "timezone": "auto", "forecast_days": 2,
         }, timeout=8)
         data = resp.json()
@@ -373,6 +373,66 @@ def get_weather(lat, lon):
         return data
     except Exception as e:
         server_log("GET", f"weather fetch failed: {e}", "warning")
+        return cached[1] if cached else None
+
+def fmt_clock(dt):
+    """12-hour compact clock, e.g. '6:02a' / '8:47p'."""
+    h = dt.hour % 12 or 12
+    return f"{h}:{dt.minute:02d}{'a' if dt.hour < 12 else 'p'}"
+
+# US AQI bands -> (upper bound, pill color, label). Our pills are green/yellow/red,
+# so the unhealthy tiers all read red but keep their distinct EPA labels.
+AQI_BANDS = [
+    (50, "green", "Good"), (100, "yellow", "Moderate"),
+    (150, "red", "Unhealthy (sensitive)"), (200, "red", "Unhealthy"),
+    (300, "red", "Very unhealthy"), (10**9, "red", "Hazardous"),
+]
+_aqi_cache = {}  # (lat, lon) -> (epoch, data)
+
+def get_air_quality(lat, lon):
+    """Current US AQI + PM2.5 from Open-Meteo's air-quality API (free), cached ~20 min.
+    PM2.5 is the wildfire-smoke proxy. Returns the parsed dict or None."""
+    if lat is None or lon is None:
+        return None
+    key = (round(lat, 2), round(lon, 2))
+    cached = _aqi_cache.get(key)
+    if cached and time_module.time() - cached[0] < 1200:
+        return cached[1]
+    try:
+        resp = requests.get("https://air-quality-api.open-meteo.com/v1/air-quality", params={
+            "latitude": lat, "longitude": lon, "current": "us_aqi,pm2_5", "timezone": "auto",
+        }, timeout=8)
+        data = resp.json()
+        _aqi_cache[key] = (time_module.time(), data)
+        return data
+    except Exception as e:
+        server_log("GET", f"air quality fetch failed: {e}", "warning")
+        return cached[1] if cached else None
+
+# Order alerts by NWS severity so we surface the worst one.
+SEVERITY_RANK = {"Extreme": 4, "Severe": 3, "Moderate": 2, "Minor": 1, "Unknown": 0}
+NWS_HEADERS = {"User-Agent": "DeltaPI/1.0 (https://github.com/techdog21/deltapi)",
+               "Accept": "application/geo+json"}
+_alerts_cache = {}  # (lat, lon) -> (epoch, list)
+
+def get_nws_alerts(lat, lon):
+    """Active NWS watches/warnings for a point (free, US only), cached ~10 min.
+    Returns a list of alert 'properties' dicts ([] = all clear), or None on
+    failure / no location. NWS requires a descriptive User-Agent."""
+    if lat is None or lon is None:
+        return None
+    key = (round(lat, 2), round(lon, 2))
+    cached = _alerts_cache.get(key)
+    if cached and time_module.time() - cached[0] < 600:
+        return cached[1]
+    try:
+        resp = requests.get("https://api.weather.gov/alerts/active",
+                            params={"point": f"{lat},{lon}"}, headers=NWS_HEADERS, timeout=8)
+        alerts = [f.get("properties", {}) for f in ((resp.json() or {}).get("features") or [])]
+        _alerts_cache[key] = (time_module.time(), alerts)
+        return alerts
+    except Exception as e:
+        server_log("GET", f"nws alerts fetch failed: {e}", "warning")
         return cached[1] if cached else None
 
 def estimate_avg_load_w(conn, now, hours=LOAD_WINDOW_HOURS):
@@ -1159,6 +1219,51 @@ def index():
     else:
         weather_html = '<div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill gray">No location</span></span></div>'
 
+    # Environment panel: severe-weather alerts (NWS), air quality (Open-Meteo),
+    # and today's solar window (from the forecast's sunrise/sunset).
+    environment_html = ""
+
+    alerts = get_nws_alerts(wx_lat, wx_lon)
+    if alerts is None:
+        environment_html += '<div class="metric"><span class="metric-label">Alert</span><span class="metric-value"><span class="pill gray">—</span></span></div>'
+    elif not alerts:
+        environment_html += '<div class="metric"><span class="metric-label">Alert</span><span class="metric-value"><span class="pill green">None</span></span></div>'
+    else:
+        top = max(alerts, key=lambda a: SEVERITY_RANK.get(a.get("severity"), 0))
+        extra = f" (+{len(alerts) - 1})" if len(alerts) > 1 else ""
+        a_cls = "red" if SEVERITY_RANK.get(top.get("severity"), 0) >= 3 else "yellow"
+        environment_html += f'<div class="metric"><span class="metric-label">Alert</span><span class="metric-value"><span class="pill {a_cls}">{escape((top.get("event") or "Alert") + extra)}</span></span></div>'
+
+    aq = (get_air_quality(wx_lat, wx_lon) or {}).get("current") or {}
+    aqi, pm = aq.get("us_aqi"), aq.get("pm2_5")
+    if aqi is None:
+        environment_html += '<div class="metric"><span class="metric-label">Air quality</span><span class="metric-value"><span class="pill gray">—</span></span></div>'
+    else:
+        aq_cls, aq_lbl = next((c, l) for mx, c, l in AQI_BANDS if aqi <= mx)
+        pm_str = f" · PM2.5 {pm:.0f}" if pm is not None else ""
+        environment_html += f'<div class="metric"><span class="metric-label">Air quality</span><span class="metric-value">AQI {aqi:.0f}{pm_str} <span class="pill {aq_cls}">{aq_lbl}</span></span></div>'
+
+    window_str = "—"
+    if wx:
+        daily = wx.get("daily") or {}
+        sr = (daily.get("sunrise") or [None])[0]
+        ss = (daily.get("sunset") or [None])[0]
+        off = wx.get("utc_offset_seconds") or 0
+        if sr and ss:
+            try:
+                sr_dt, ss_dt = datetime.fromisoformat(sr), datetime.fromisoformat(ss)
+                local_now = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=off)
+                if local_now < sr_dt:
+                    tail = " · before sunrise"
+                elif local_now > ss_dt:
+                    tail = " · sun down"
+                else:
+                    tail = f" · {(ss_dt - local_now).total_seconds() / 3600:.1f} h left"
+                window_str = f"{fmt_clock(sr_dt)}–{fmt_clock(ss_dt)}{tail}"
+            except Exception:
+                window_str = "—"
+    environment_html += f'<div class="metric"><span class="metric-label">Solar window</span><span class="metric-value">{window_str}</span></div>'
+
     # Sustainability Outlook (Solar panel): fuse measured daily harvest vs
     # consumption, the current charge state, and the solar forecast into one
     # forward-looking state (Self-sufficient / Sustaining / Drawing down / Critical).
@@ -1535,8 +1640,14 @@ def index():
         {weather_html}
     </div>
 
-    <!-- Pi Health (full width below the summary panels) -->
-    <div class="panel panel-wide">"""
+    <!-- Environment: severe-weather alerts, air quality, solar window -->
+    <div class="panel">
+        <h2>Environment</h2>
+        {environment_html}
+    </div>
+
+    <!-- Pi Health -->
+    <div class="panel">"""
 
     if pi_status_row:
         # Escape every Pi-reported field; the Pi controls these strings, so a
