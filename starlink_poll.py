@@ -52,6 +52,7 @@ def poll_once():
         return state
     state.update({
         "ok": True,
+        "id": status.get("id"),  # stable dish hardware id — lets the server detect "home"
         "state": status.get("state"),
         "obstruction_pct": round((status.get("fraction_obstructed") or 0) * 100, 2),
         "currently_obstructed": bool(status.get("currently_obstructed")),

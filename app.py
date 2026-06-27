@@ -122,10 +122,11 @@ def _env_float(name):
         return float(os.environ[name])
     except Exception:
         return None
-# Fallback weather location (set in the Render dashboard) used when the Starlink
-# dish isn't sharing GPS yet. Kept out of the repo for privacy.
+# Fallback weather location (set in the Render dashboard) used when the connected
+# dish is the home dish (no GPS over the API). Kept out of the repo for privacy.
 HOME_LAT = _env_float("HOME_LAT")
 HOME_LON = _env_float("HOME_LON")
+HOME_DISH_ID = os.environ.get("HOME_DISH_ID")  # round home dish id -> use HOME_LAT/LON
 _last_cleanup = 0
 _cleanup_lock = threading.Lock()
 MT = ZoneInfo("America/Denver")
@@ -1072,11 +1073,15 @@ def index():
     sl_speed_str = f"{sl_down:.1f}↓ / {sl_up:.1f}↑ Mbps" if sl_down is not None else "—"
     sl_latency_str = f"{sl_latency:.0f} ms" if sl_latency is not None else "—"
 
-    # ---- Weather (Open-Meteo) — dish GPS if shared, else the configured home fallback ----
-    wx_lat = (starlink or {}).get("lat")
-    wx_lon = (starlink or {}).get("lon")
-    if wx_lat is None:
-        wx_lat, wx_lon = HOME_LAT, HOME_LON
+    # ---- Weather location: dish GPS (Mini) -> home dish id -> home coords; else unknown ----
+    dish_id = (starlink or {}).get("id")
+    dlat, dlon = (starlink or {}).get("lat"), (starlink or {}).get("lon")
+    if dlat is not None:
+        wx_lat, wx_lon = dlat, dlon                      # dish sharing GPS (Mini on the road)
+    elif (HOME_DISH_ID and dish_id == HOME_DISH_ID) or not HOME_DISH_ID:
+        wx_lat, wx_lon = HOME_LAT, HOME_LON              # home dish (or unconfigured) -> home coords
+    else:
+        wx_lat = wx_lon = None                           # roaming on a no-GPS dish -> unknown
     wx = get_weather(wx_lat, wx_lon)
     if wx:
         cur = wx.get("current") or {}
