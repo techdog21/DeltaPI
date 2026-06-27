@@ -1,6 +1,7 @@
 # DeltaPI — Off-Grid Camp Monitor
 
-![Dashboard](static/deltapi.png)
+![Dashboard — battery, solar & Starlink](static/deltapi.png)
+![Dashboard — weather, Pi health & charts](static/deltapi1.png)
 
 DeltaPI started as a Victron solar monitor and grew into a single-screen **camp
 systems dashboard** for an off-grid RV: **power, connectivity, and weather** at a
