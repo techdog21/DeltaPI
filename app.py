@@ -451,6 +451,10 @@ def get_nws_alerts(lat, lon):
         server_log("GET", f"nws alerts fetch failed: {e}", "warning")
         return cached[1] if cached else None
 
+def _sl_up(sl):
+    """True when Starlink is actively connected (basis for the up/down streak)."""
+    return bool(sl) and bool(sl.get("ok")) and sl.get("state") == "CONNECTED" and not sl.get("currently_obstructed")
+
 def estimate_avg_load_w(conn, now, hours=LOAD_WINDOW_HOURS):
     """
     Trailing average house load (W) derived from energy balance, since the MPPT
@@ -1172,6 +1176,33 @@ def index():
     else:
         sl_status_class, sl_status_label = "yellow", str(starlink.get("state") or "?").title()
 
+    # How long Starlink has held its current up/down state: walk frame history
+    # (rows are newest-first) until the connected/not-connected state flips.
+    sl_streak_html = ""
+    if starlink:
+        cur_up = _sl_up(starlink)
+        streak_start, hit_edge = None, True
+        for r_ts, _r_recv, r_data in rows:
+            try:
+                sl = json.loads(r_data).get("starlink")
+            except Exception:
+                continue
+            if not sl:
+                continue
+            if _sl_up(sl) == cur_up:
+                streak_start = r_ts          # extend the streak back to this frame
+            else:
+                hit_edge = False             # found the transition
+                break
+        if streak_start:
+            try:
+                mins = (now - ensure_utc(datetime.fromisoformat(streak_start))).total_seconds() / 60
+                pre = "≥" if hit_edge else ""          # ≥ means the streak predates our window
+                lbl = "Online for" if cur_up else "Offline for"
+                sl_streak_html = f'<div class="metric"><span class="metric-label">{lbl}</span><span class="metric-value">{pre}{humanize_minutes(mins)}</span></div>'
+            except Exception:
+                sl_streak_html = ""
+
     sl_obs = starlink.get("obstruction_pct") if starlink else None
     if sl_obs is None:
         sl_obs_class, sl_obs_label = "gray", "—"
@@ -1675,6 +1706,7 @@ def index():
     <div class="panel">
         <h2>Starlink</h2>
         <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill {sl_status_class}">{sl_status_label}</span></span></div>
+        {sl_streak_html}
         <div class="metric"><span class="metric-label">Obstruction</span><span class="metric-value">{sl_obs_str} <span class="pill {sl_obs_class}">{sl_obs_label}</span></span></div>
         <div class="metric"><span class="metric-label">Alerts</span><span class="metric-value"><span class="pill {sl_alert_class}">{sl_alert_label}</span></span></div>
         <div class="metric"><span class="metric-label">Speed</span><span class="metric-value">{sl_speed_str}</span></div>
