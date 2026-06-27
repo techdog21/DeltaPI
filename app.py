@@ -133,6 +133,15 @@ CS_MAP = {
     "5": "Float"
 }
 
+# VE.Direct charger error codes (ERR) -> short labels; unmapped codes show "Error N"
+ERR_MAP = {
+    "0": "OK", "2": "Battery high V", "17": "Overtemp", "18": "Over-current",
+    "19": "Current reversed", "20": "Bulk time exceeded", "21": "Sensor issue",
+    "26": "Terminals hot", "28": "Power stage", "33": "PV over-voltage",
+    "34": "PV over-current", "38": "PV shutdown (batt V)", "65": "Comm lost",
+    "67": "BMS lost", "116": "Cal lost", "117": "Bad firmware", "119": "Settings lost",
+}
+
 # ------------------ DB Init ------------------ #
 def init_db():
     """
@@ -882,6 +891,24 @@ def index():
         (150, ("green", "Good")), (float('inf'), ("green", "Strong")),
     ])
 
+    # Charge mode (CS) — green while charging, red on fault, gray when idle/off
+    if parsed:
+        mode_label = parsed[0][6]
+        mode_class = ("green" if mode_label in ("Bulk", "Absorption", "Float")
+                      else "red" if mode_label == "Fault" else "gray")
+    else:
+        mode_class, mode_label = "gray", "Unknown"
+
+    # Controller health from the ERR code — green "OK", red with the reason
+    if parsed:
+        err_code = str(parsed[0][7]).replace("\x00", "").strip() or "0"
+        if err_code == "0":
+            ctrl_class, ctrl_label = "green", "OK"
+        else:
+            ctrl_class, ctrl_label = "red", ERR_MAP.get(err_code, f"Error {err_code}")
+    else:
+        ctrl_class, ctrl_label = "gray", "Unknown"
+
     # Disk status
     data_percent, data_class, data_label = get_disk_status(DB_DIR)
 
@@ -1214,6 +1241,8 @@ def index():
     <div class="panel">
         <h2>Solar System</h2>
         <div class="metric"><span class="metric-label">Solar data</span><span class="metric-value"><span class="pill {status_color}">{status_text}</span></span></div>
+        <div class="metric"><span class="metric-label">Controller</span><span class="metric-value"><span class="pill {ctrl_class}">{ctrl_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Mode</span><span class="metric-value"><span class="pill {mode_class}">{mode_label}</span></span></div>
         <div class="metric"><span class="metric-label">Solar power</span><span class="metric-value">{solar_now} W <span class="pill {solar_class}">{solar_label}</span></span></div>
         <div class="metric"><span class="metric-label">Panel V</span><span class="metric-value">{latest_vpv:.2f} V <span class="pill {vpv_color}">{vpv_message}</span></span></div>
     </div>
@@ -1236,7 +1265,7 @@ def index():
         pi_wifi_signal = escape(pi_status_row.get('wifi_signal') or '?')
         html += f"""
         <h2>Pi Health — {pi_name}</h2>
-        <div class="metric"><span class="metric-label">Controller</span><span class="metric-value"><span class="pill {controller_class}">{controller_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Link</span><span class="metric-value"><span class="pill {controller_class}">{controller_label}</span></span></div>
         <div class="metric"><span class="metric-label">OS</span><span class="metric-value">{pi_os_val}</span></div>
         <div class="metric"><span class="metric-label">Uptime</span><span class="metric-value">{pi_uptime}</span></div>
         <div class="metric"><span class="metric-label">Last Check-in</span><span class="metric-value"><span class="pill {checkin_class}">{checkin_label}</span></span></div>
