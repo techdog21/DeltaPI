@@ -20,11 +20,14 @@ Three summary panels plus charts and a readings table:
   feed health pill, temperature (with a LiFePO4 cold-charge warning), cell balance,
   consumption, runtime, and time-to-full.
 - **Solar System**: data-freshness, controller health (from the VE.Direct `ERR`
-  code), charge mode (Bulk/Absorption/Float), solar power, and panel voltage.
+  code), charge mode (Bulk/Absorption/Float), solar power, yield today, and panel
+  voltage.
 - **Pi Health**: serial link, OS, uptime, last check-in, CPU/fan, updates,
   memory/disk, Wi-Fi, container disk.
 - **Charts** (Chart.js): Solar Power (W), Battery Voltage (V), Daily Energy (kWh),
-  Battery SOC (%) with a red danger floor, and Consumption (W).
+  Battery SOC (%) with a red danger floor, Consumption (W), Charge Power (W, MPPT
+  output to the battery), Battery Temp (°F) with a freezing line, and Daily
+  Consumption (kWh).
 - Latest readings table, light/dark theme toggle (cookie-persisted), and a
   responsive layout that stacks to a single scrolling column on iPhone.
 

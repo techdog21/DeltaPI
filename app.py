@@ -658,7 +658,9 @@ def index():
             if bat and bat.get("soc") is not None:
                 # true house load = MPPT output (V*I) minus battery net power
                 house = max(0, round(v * i - (bat.get("power") or 0), 1))
-                batt_series.append((ts, bat["soc"], house))
+                temps = [t for p in (bat.get("per") or []) if p.get("ok")
+                         for t in (p.get("temps_f") or []) if isinstance(t, (int, float))]
+                batt_series.append((ts, bat["soc"], house, max(temps) if temps else None))
         except Exception as e:
             server_log("GET", f"Skipping row due to error: {e}", "warning")
 
@@ -706,19 +708,40 @@ def index():
     h20_days = sorted(daily_h20.keys())
     h20_values = [round(daily_h20[day], 2) for day in h20_days]
 
-    # Voltage chart
+    # Voltage / power charts
     voltage_timestamps, voltage_values = build_voltage_series(parsed_chrono)
     timestamps = [fmt_mt(p[0]) for p in reversed(parsed)]
-    powers = [p[3] for p in reversed(parsed)]
+    powers = [p[3] for p in reversed(parsed)]                          # PPV (panel input)
+    charge_powers = [round(p[1] * p[2], 1) for p in reversed(parsed)]  # MPPT output to battery (V*I)
+    today_yield = parsed[0][8] if parsed else 0                        # H20, kWh produced today
 
     # Battery charts (measured) — chronological; only frames carrying battery data.
     batt_chrono = list(reversed(batt_series))
     batt_times = [fmt_mt(b[0]) for b in batt_chrono]
     batt_soc_values = [b[1] for b in batt_chrono]
     batt_load_values = [b[2] for b in batt_chrono]
+    batt_temp_values = [b[3] for b in batt_chrono]
     SOC_DANGER = 20  # red floor line: regularly draining below this shortens LiFePO4 life
+    FREEZE_F = 32    # red line on the temp chart: LiFePO4 must not charge below freezing
     # Daily-energy chart: scale to the data instead of a fixed 1.6 ceiling
     h20_ymax = max([round(max(h20_values) * 1.25, 1), 0.5]) if h20_values else 1.6
+
+    # Daily consumption (kWh) — trapezoidal-integrate measured house load per day,
+    # skipping gaps > 30 min so feed downtime isn't counted as usage.
+    daily_cons_wh = defaultdict(float)
+    prev_t, prev_p = None, None
+    for b in batt_chrono:
+        try:
+            t = datetime.fromisoformat(b[0])
+        except Exception:
+            continue
+        if prev_t is not None:
+            dt_h = (t - prev_t).total_seconds() / 3600
+            if 0 < dt_h < 0.5:
+                daily_cons_wh[t.date().isoformat()] += (b[2] + prev_p) / 2 * dt_h
+        prev_t, prev_p = t, b[2]
+    cons_days = sorted(daily_cons_wh.keys())
+    cons_values = [round(daily_cons_wh[d] / 1000, 2) for d in cons_days]
 
     # Pi health pills
     try:
@@ -1290,6 +1313,7 @@ def index():
         <div class="metric"><span class="metric-label">Controller</span><span class="metric-value"><span class="pill {ctrl_class}">{ctrl_label}</span></span></div>
         <div class="metric"><span class="metric-label">Mode</span><span class="metric-value"><span class="pill {mode_class}">{mode_label}</span></span></div>
         <div class="metric"><span class="metric-label">Solar power</span><span class="metric-value">{solar_now} W <span class="pill {solar_class}">{solar_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Yield today</span><span class="metric-value">{today_yield:.2f} kWh</span></div>
         <div class="metric"><span class="metric-label">Panel V</span><span class="metric-value">{latest_vpv:.2f} V <span class="pill {vpv_color}">{vpv_message}</span></span></div>
     </div>
 
@@ -1356,6 +1380,24 @@ def index():
     <div class="chart-panel">
         <h2>Consumption (W)</h2>
         <div class="chart-wrap"><canvas id="chartLoad"></canvas></div>
+    </div>
+
+    <!-- Chart: Charge Power to battery (MPPT output) -->
+    <div class="chart-panel">
+        <h2>Charge Power (W)</h2>
+        <div class="chart-wrap"><canvas id="chartCharge"></canvas></div>
+    </div>
+
+    <!-- Chart: Battery Temperature (measured) -->
+    <div class="chart-panel">
+        <h2>Battery Temp (°F)</h2>
+        <div class="chart-wrap"><canvas id="chartTemp"></canvas></div>
+    </div>
+
+    <!-- Chart: Daily Consumption (measured) -->
+    <div class="chart-panel">
+        <h2>Daily Consumption (kWh)</h2>
+        <div class="chart-wrap"><canvas id="chartConsDaily"></canvas></div>
     </div>
 
     <!-- Latest Readings Table -->
@@ -1485,6 +1527,39 @@ new Chart(document.getElementById('chartLoad'), {{
     data: {{
         labels: {json.dumps(batt_times)},
         datasets: [{{ data: {json.dumps(batt_load_values)}, borderColor: style.getPropertyValue('--chart-power').trim(), fill: false, tension: 0.2, pointRadius: 0 }}]
+    }},
+    options: chartOpts(0, null, null)
+}});
+
+// Charge Power to battery (MPPT output, W)
+new Chart(document.getElementById('chartCharge'), {{
+    type: 'line',
+    data: {{
+        labels: {json.dumps(timestamps)},
+        datasets: [{{ data: {json.dumps(charge_powers)}, borderColor: style.getPropertyValue('--chart-h21-border').trim(), fill: false, tension: 0.1 }}]
+    }},
+    options: chartOpts(0, null, null)
+}});
+
+// Battery Temperature (measured, °F) with a red freezing line at {FREEZE_F}°F
+new Chart(document.getElementById('chartTemp'), {{
+    type: 'line',
+    data: {{
+        labels: {json.dumps(batt_times)},
+        datasets: [
+            {{ data: {json.dumps(batt_temp_values)}, borderColor: style.getPropertyValue('--chart-power').trim(), fill: false, tension: 0.3, pointRadius: 0, spanGaps: true }},
+            {{ data: Array({len(batt_times)}).fill({FREEZE_F}), borderColor: style.getPropertyValue('--pill-red').trim(), borderDash: [4,3], fill: false, pointRadius: 0 }}
+        ]
+    }},
+    options: chartOpts(null, null, null)
+}});
+
+// Daily Consumption (measured, kWh)
+new Chart(document.getElementById('chartConsDaily'), {{
+    type: 'bar',
+    data: {{
+        labels: {json.dumps(cons_days)},
+        datasets: [{{ data: {json.dumps(cons_values)}, backgroundColor: style.getPropertyValue('--chart-h21').trim(), borderColor: style.getPropertyValue('--chart-power').trim(), borderWidth: 1 }}]
     }},
     options: chartOpts(0, null, null)
 }});
