@@ -65,6 +65,7 @@ import sys
 import hmac
 import time as time_module
 import json
+import math
 import logging
 import sqlite3
 import shutil
@@ -364,9 +365,10 @@ def get_weather(lat, lon):
     try:
         resp = requests.get("https://api.open-meteo.com/v1/forecast", params={
             "latitude": lat, "longitude": lon,
-            "current": "temperature_2m,cloud_cover,weather_code",
+            "current": "temperature_2m,relative_humidity_2m,dew_point_2m,cloud_cover,weather_code,wind_speed_10m,wind_gusts_10m",
             "daily": "weather_code,temperature_2m_min,shortwave_radiation_sum,sunrise,sunset",
-            "temperature_unit": "fahrenheit", "timezone": "auto", "forecast_days": 2,
+            "temperature_unit": "fahrenheit", "wind_speed_unit": "mph",
+            "timezone": "auto", "forecast_days": 2,
         }, timeout=8)
         data = resp.json()
         _weather_cache[key] = (time_module.time(), data)
@@ -379,6 +381,20 @@ def fmt_clock(dt):
     """12-hour compact clock, e.g. '6:02a' / '8:47p'."""
     h = dt.hour % 12 or 12
     return f"{h}:{dt.minute:02d}{'a' if dt.hour < 12 else 'p'}"
+
+# Synodic month and a reference new moon (2000-01-06 18:14 UTC) for phase math.
+_SYNODIC = 29.530588853
+_MOON_REF = datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
+_MOON_NAMES = ["New moon", "Waxing crescent", "First quarter", "Waxing gibbous",
+               "Full moon", "Waning gibbous", "Last quarter", "Waning crescent"]
+
+def moon_phase(dt):
+    """(name, illumination %) for the given UTC datetime — pure date math, no API."""
+    age = ((dt - _MOON_REF).total_seconds() / 86400) % _SYNODIC
+    illum = round((1 - math.cos(2 * math.pi * age / _SYNODIC)) / 2 * 100)
+    # 8 phases centered on the named points; +0.5 so each name spans an eighth.
+    name = _MOON_NAMES[int((age / _SYNODIC) * 8 + 0.5) % 8]
+    return name, illum
 
 # US AQI bands -> (upper bound, pill color, label). Our pills are green/yellow/red,
 # so the unhealthy tiers all read red but keep their distinct EPA labels.
@@ -1243,6 +1259,29 @@ def index():
         pm_str = f" · PM2.5 {pm:.0f}" if pm is not None else ""
         environment_html += f'<div class="metric"><span class="metric-label">Air quality</span><span class="metric-value">AQI {aqi:.0f}{pm_str} <span class="pill {aq_cls}">{aq_lbl}</span></span></div>'
 
+    # Weather-derived environment rows (only when we have a location/forecast).
+    if wx:
+        cur = wx.get("current") or {}
+        wind, gust = cur.get("wind_speed_10m"), cur.get("wind_gusts_10m")
+        if wind is not None:
+            if gust is not None and gust >= 45:
+                w_pill = ' <span class="pill red">High wind</span>'
+            elif gust is not None and gust >= 30:
+                w_pill = ' <span class="pill yellow">Breezy</span>'
+            else:
+                w_pill = ""
+            g_str = f" · gusts {gust:.0f}" if gust is not None else ""
+            environment_html += f'<div class="metric"><span class="metric-label">Wind</span><span class="metric-value">{wind:.0f} mph{g_str}{w_pill}</span></div>'
+        rh, dew, t_now = cur.get("relative_humidity_2m"), cur.get("dew_point_2m"), cur.get("temperature_2m")
+        if rh is not None:
+            d_str = f" · dew {dew:.0f}°F" if dew is not None else ""
+            cond = ' <span class="pill yellow">Condensation likely</span>' if (
+                dew is not None and t_now is not None and (t_now - dew) < 5) else ""
+            environment_html += f'<div class="metric"><span class="metric-label">Humidity</span><span class="metric-value">{rh:.0f}%{d_str}{cond}</span></div>'
+        low0 = ((wx.get("daily") or {}).get("temperature_2m_min") or [None])[0]
+        if low0 is not None:
+            environment_html += f'<div class="metric"><span class="metric-label">Tonight\'s low</span><span class="metric-value">{low0:.0f}°F</span></div>'
+
     window_str = "—"
     if wx:
         daily = wx.get("daily") or {}
@@ -1263,6 +1302,10 @@ def index():
             except Exception:
                 window_str = "—"
     environment_html += f'<div class="metric"><span class="metric-label">Solar window</span><span class="metric-value">{window_str}</span></div>'
+    if wx and wx.get("elevation") is not None:
+        environment_html += f'<div class="metric"><span class="metric-label">Elevation</span><span class="metric-value">{wx["elevation"] * 3.28084:,.0f} ft</span></div>'
+    mp_name, mp_illum = moon_phase(datetime.now(timezone.utc))
+    environment_html += f'<div class="metric"><span class="metric-label">Moon</span><span class="metric-value">{mp_name} · {mp_illum}%</span></div>'
 
     # Sustainability Outlook (Solar panel): fuse measured daily harvest vs
     # consumption, the current charge state, and the solar forecast into one

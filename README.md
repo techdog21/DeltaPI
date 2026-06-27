@@ -41,8 +41,9 @@ solar production, which has no "bad" state — green = producing, gray = off).
 - **Weather**: current conditions, cloud cover, tomorrow's charging outlook, freeze
   warning. Located from the dish's GPS, or a configured home fallback.
 - **Environment**: severe-weather alert (NWS watches/warnings — storm/wind/flood/fire),
-  air quality (US AQI + PM2.5 as a wildfire-smoke proxy), and today's solar window
-  (sunrise–sunset + hours of sun left).
+  air quality (US AQI + PM2.5 as a wildfire-smoke proxy), wind + gusts, humidity + dew
+  point (with a condensation-risk flag), tonight's low, today's solar window
+  (sunrise–sunset + hours of sun left), site elevation, and moon phase + illumination.
 - **Pi Health**: serial link, OS, uptime, last check-in, CPU/fan, updates, mem/disk,
   Wi-Fi, container disk.
 - **Charts** (Chart.js): Solar Power, Battery Voltage, Daily Energy (kWh), Battery SOC
