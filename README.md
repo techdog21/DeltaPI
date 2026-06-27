@@ -22,6 +22,10 @@ Three summary panels plus charts and a readings table:
 - **Solar System**: data-freshness, controller health (from the VE.Direct `ERR`
   code), charge mode (Bulk/Absorption/Float), solar power, yield today, and panel
   voltage.
+- **Starlink** (via the dish's local gRPC API): connection status, obstruction %,
+  alerts (mast-not-vertical, thermal, roaming, water, …), throughput, latency.
+- **Weather** (Open-Meteo, located from the dish's GPS): current conditions, cloud
+  cover, tomorrow's charging outlook, and a freeze warning.
 - **Pi Health**: serial link, OS, uptime, last check-in, CPU/fan, updates,
   memory/disk, Wi-Fi, container disk.
 - **Charts** (Chart.js): Solar Power (W), Battery Voltage (V), Daily Energy (kWh),
@@ -61,6 +65,25 @@ Implementation notes:
 - Runs in a **separate venv** on the Pi (`deploy/requirements-ble.txt` → `bleak`); deliberately **not** in the top-level `requirements.txt`, so the Render server never builds Bluetooth packages.
 - Setup: install the venv + deps, edit the battery MAC addresses/aliases at the top of `renogy_ble.py`, then install `deploy/renogy_ble.service`. The Pi's `bluetooth` service must be enabled (`sudo systemctl enable --now bluetooth`).
 - One battery BLE connection at a time: while the Pi is polling, the Renogy phone app may not connect (and vice-versa).
+
+## Starlink & Weather
+
+`starlink_poll.py` runs as its own systemd service (`starlink_poll`), querying the
+Starlink dish's local gRPC API (`192.168.100.1:9200`) every ~60 s and writing
+`/var/log/vedirect/starlink_state.json`, which the logger merges into uploads (same
+pattern as the battery feed). It powers the **Starlink** panel (status / obstruction
+/ alerts / throughput / latency) and provides the dish's **GPS location**, which the
+server uses to fetch **weather** from [Open-Meteo](https://open-meteo.com) (free, no
+API key, cached ~20 min) for the **Weather** panel.
+
+Setup:
+- Clone the gRPC tool and install Pi-side deps (not vendored — large / unclear license):
+  `git clone https://github.com/sparky8512/starlink-grpc-tools ~/starlink-grpc-tools`
+  then `deltapi-venv/bin/pip install -r deploy/requirements-starlink.txt`.
+- Install `deploy/starlink_poll.service` (adjust user/paths) and enable it.
+- Status/obstruction/alerts work immediately. **Location/weather** additionally
+  requires enabling **"Allow access on local network"** in the Starlink app — works
+  on both the round/standard dish and the Mini (both have GPS + the same API).
 
 ## Environment Variables
 

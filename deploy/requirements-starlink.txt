@@ -1,0 +1,8 @@
+# Pi-only deps for starlink_poll.py — install into the Pi-side venv ONLY (kept out
+# of the top-level requirements.txt so the Render server doesn't pull them).
+# Also requires the starlink-grpc-tools repo cloned for the `starlink_grpc` module
+# (see deploy/starlink_poll.service). That tool is large / unclear-license, so it is
+# referenced as a local clone rather than vendored.
+grpcio
+yagrc
+protobuf

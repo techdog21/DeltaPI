@@ -56,6 +56,9 @@ OFFSET_FILE = "/var/log/vedirect/sent_offset.txt"
 # uploaded frame if present; the embedded `ts`/`healthy` let the dashboard show
 # whether the battery feed is live, stale, or down rather than trusting it blindly.
 BATTERY_STATE_PATH = "/var/log/vedirect/battery_state.json"
+# Starlink dish snapshot written by starlink_poll.py (separate service), merged
+# into each uploaded frame the same way as the battery state.
+STARLINK_STATE_PATH = "/var/log/vedirect/starlink_state.json"
 POST_SECRET = os.environ.get("POST_SECRET")
 if not POST_SECRET:
     print("[FATAL] POST_SECRET environment variable is not set. Exiting.")
@@ -549,6 +552,14 @@ def read_battery_state():
                 for b in s.get("batteries", [])],
     }
 
+def read_starlink_state():
+    """Return the Starlink dish snapshot (written by starlink_poll), or None."""
+    try:
+        with open(STARLINK_STATE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
 # ------------------ Main ------------------ #
 def main():
     """
@@ -598,6 +609,9 @@ def main():
                         battery = read_battery_state()
                         if battery:
                             frame["battery"] = battery  # measured SOC/load from the BLE poller
+                        starlink = read_starlink_state()
+                        if starlink:
+                            frame["starlink"] = starlink  # dish status/location from starlink_poll
                         try:
                             with open(LOG_PATH, "a") as f:
                                 json.dump(frame, f)

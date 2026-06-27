@@ -69,6 +69,7 @@ import logging
 import sqlite3
 import shutil
 import threading
+import requests
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from collections import defaultdict
@@ -284,6 +285,40 @@ def fmt_runtime(draw_w, battery_wh, tag=""):
     h = battery_wh / draw_w
     span = f"{h / 24:.1f} d" if h >= 48 else (f"{h:.1f} h" if h >= 1 else f"{int(h * 60)} min")
     return f"{span} @ {draw_w:.0f}W{tag}"
+
+# WMO weather codes -> short labels (Open-Meteo current/daily weather_code)
+WMO_CODES = {
+    0: "Clear", 1: "Mostly clear", 2: "Partly cloudy", 3: "Overcast",
+    45: "Fog", 48: "Rime fog", 51: "Lt drizzle", 53: "Drizzle", 55: "Hvy drizzle",
+    61: "Lt rain", 63: "Rain", 65: "Hvy rain", 66: "Freezing rain", 67: "Freezing rain",
+    71: "Lt snow", 73: "Snow", 75: "Hvy snow", 77: "Snow", 80: "Showers", 81: "Showers",
+    82: "Hvy showers", 85: "Snow showers", 86: "Snow showers", 95: "Thunderstorm",
+    96: "Thunderstorm", 99: "Thunderstorm",
+}
+_weather_cache = {}  # (lat, lon) -> (epoch, data)
+
+def get_weather(lat, lon):
+    """Current + 2-day forecast from Open-Meteo (free, no API key), cached ~20 min.
+    Returns the parsed dict or None (no location / fetch failure)."""
+    if lat is None or lon is None:
+        return None
+    key = (round(lat, 2), round(lon, 2))
+    cached = _weather_cache.get(key)
+    if cached and time_module.time() - cached[0] < 1200:
+        return cached[1]
+    try:
+        resp = requests.get("https://api.open-meteo.com/v1/forecast", params={
+            "latitude": lat, "longitude": lon,
+            "current": "temperature_2m,cloud_cover,weather_code",
+            "daily": "weather_code,temperature_2m_min,shortwave_radiation_sum",
+            "temperature_unit": "fahrenheit", "timezone": "auto", "forecast_days": 2,
+        }, timeout=8)
+        data = resp.json()
+        _weather_cache[key] = (time_module.time(), data)
+        return data
+    except Exception as e:
+        server_log("GET", f"weather fetch failed: {e}", "warning")
+        return cached[1] if cached else None
 
 def estimate_avg_load_w(conn, now, hours=LOAD_WINDOW_HOURS):
     """
@@ -977,6 +1012,91 @@ def index():
         elif soc_percent and soc_percent >= 99:
             ttf_str = "Full"
 
+    # ---- Starlink connectivity (dish status via starlink_poll, merged by logger) ----
+    starlink = None
+    if rows:
+        try:
+            starlink = json.loads(rows[0][2]).get("starlink")
+        except Exception:
+            starlink = None
+    sl_age = None
+    if starlink and starlink.get("timestamp"):
+        try:
+            sl_age = (datetime.now(timezone.utc) - ensure_utc(datetime.fromisoformat(starlink["timestamp"]))).total_seconds()
+        except Exception:
+            sl_age = None
+
+    if not starlink or sl_age is None:
+        sl_status_class, sl_status_label = "gray", "No data"
+    elif sl_age >= 600 or not starlink.get("ok"):
+        sl_status_class, sl_status_label = "red", "Offline"
+    elif starlink.get("currently_obstructed"):
+        sl_status_class, sl_status_label = "yellow", "Obstructed"
+    elif starlink.get("state") == "CONNECTED":
+        sl_status_class, sl_status_label = "green", "Online"
+    else:
+        sl_status_class, sl_status_label = "yellow", str(starlink.get("state") or "?").title()
+
+    sl_obs = starlink.get("obstruction_pct") if starlink else None
+    if sl_obs is None:
+        sl_obs_class, sl_obs_label = "gray", "—"
+    elif (starlink.get("currently_obstructed") if starlink else False) or sl_obs >= 5:
+        sl_obs_class, sl_obs_label = "red", "Blocked"
+    elif sl_obs >= 1:
+        sl_obs_class, sl_obs_label = "yellow", "Some"
+    else:
+        sl_obs_class, sl_obs_label = "green", "Clear"
+    sl_obs_str = f"{sl_obs}%" if sl_obs is not None else "—"
+
+    sl_alerts = (starlink.get("alerts") if starlink else None) or []
+    if not starlink:
+        sl_alert_class, sl_alert_label = "gray", "—"
+    elif sl_alerts:
+        sl_alert_class, sl_alert_label = "red", escape(", ".join(sl_alerts))
+    else:
+        sl_alert_class, sl_alert_label = "green", "None"
+
+    sl_down = starlink.get("down_mbps") if starlink else None
+    sl_up = starlink.get("up_mbps") if starlink else None
+    sl_latency = starlink.get("latency_ms") if starlink else None
+    sl_speed_str = f"{sl_down:.1f}↓ / {sl_up:.1f}↑ Mbps" if sl_down is not None else "—"
+    sl_latency_str = f"{sl_latency:.0f} ms" if sl_latency is not None else "—"
+
+    # ---- Weather (Open-Meteo; location comes from the dish, once enabled) ----
+    wx = get_weather(starlink.get("lat"), starlink.get("lon")) if starlink else None
+    if wx:
+        cur = wx.get("current") or {}
+        daily = wx.get("daily") or {}
+        wx_cond = WMO_CODES.get(cur.get("weather_code"), "—")
+        wx_temp, wx_cloud = cur.get("temperature_2m"), cur.get("cloud_cover")
+        codes = daily.get("weather_code") or []
+        rad = daily.get("shortwave_radiation_sum") or []
+        lows = [t for t in (daily.get("temperature_2m_min") or []) if t is not None]
+        tomo_cond = WMO_CODES.get(codes[1], "—") if len(codes) > 1 else "—"
+        tomo_rad = rad[1] if len(rad) > 1 else None
+        if tomo_rad is None:
+            chg_class, chg_label = "gray", "—"
+        elif tomo_rad >= 18:
+            chg_class, chg_label = "green", "Good sun"
+        elif tomo_rad >= 8:
+            chg_class, chg_label = "yellow", "Fair"
+        else:
+            chg_class, chg_label = "red", "Poor"
+        temp_str = f"{wx_temp:.0f}°F" if wx_temp is not None else "—"
+        cloud_str = f"{wx_cloud}%" if wx_cloud is not None else "—"
+        weather_html = (
+            f'<div class="metric"><span class="metric-label">Now</span><span class="metric-value">{escape(wx_cond)}, {temp_str}</span></div>'
+            f'<div class="metric"><span class="metric-label">Cloud cover</span><span class="metric-value">{cloud_str}</span></div>'
+            f'<div class="metric"><span class="metric-label">Tomorrow</span><span class="metric-value">{escape(tomo_cond)}</span></div>'
+            f'<div class="metric"><span class="metric-label">Charging outlook</span><span class="metric-value"><span class="pill {chg_class}">{chg_label}</span></span></div>'
+        )
+        if any(t < 32 for t in lows):
+            weather_html += '<div class="metric"><span class="metric-label">Freeze</span><span class="metric-value"><span class="pill red">Freeze risk — heater may run</span></span></div>'
+    elif starlink and starlink.get("lat") is None:
+        weather_html = '<p style="color:var(--text-muted);font-size:12px;">Enable location sharing in the Starlink app ("Allow access on local network") to show weather.</p>'
+    else:
+        weather_html = '<p style="color:var(--text-muted);font-size:12px;">No location yet.</p>'
+
     # Disk status
     data_percent, data_class, data_label = get_disk_status(DB_DIR)
 
@@ -1320,7 +1440,23 @@ def index():
         <div class="metric"><span class="metric-label">Panel V</span><span class="metric-value">{latest_vpv:.2f} V <span class="pill {vpv_color}">{vpv_message}</span></span></div>
     </div>
 
-    <!-- Pi Health (full width below the two summary panels) -->
+    <!-- Starlink -->
+    <div class="panel">
+        <h2>Starlink</h2>
+        <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill {sl_status_class}">{sl_status_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Obstruction</span><span class="metric-value">{sl_obs_str} <span class="pill {sl_obs_class}">{sl_obs_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Alerts</span><span class="metric-value"><span class="pill {sl_alert_class}">{sl_alert_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Speed</span><span class="metric-value">{sl_speed_str}</span></div>
+        <div class="metric"><span class="metric-label">Latency</span><span class="metric-value">{sl_latency_str}</span></div>
+    </div>
+
+    <!-- Weather (Open-Meteo, dish location) -->
+    <div class="panel">
+        <h2>Weather</h2>
+        {weather_html}
+    </div>
+
+    <!-- Pi Health (full width below the summary panels) -->
     <div class="panel panel-wide">"""
 
     if pi_status_row:

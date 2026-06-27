@@ -1,0 +1,29 @@
+# DeltaPI Starlink poller — systemd unit.
+# Queries the Starlink dish's local gRPC API and writes
+# /var/log/vedirect/starlink_state.json, which vedirect_logger.py merges into uploads.
+#
+# Setup on the Pi (adjust User/paths; README uses pi):
+#   git clone https://github.com/sparky8512/starlink-grpc-tools ~/starlink-grpc-tools
+#   /home/pi/deltapi-venv/bin/pip install -r /home/pi/deltapi/deploy/requirements-starlink.txt
+#   sudo cp deploy/starlink_poll.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now starlink_poll
+#
+# The dish must be reachable at 192.168.100.1 (it is, through the Starlink router).
+# Location (for weather) also requires enabling "Allow access on local network" in
+# the Starlink app; status/obstruction/alerts work without it.
+[Unit]
+Description=DeltaPI Starlink Poller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/deltapi
+Environment=STARLINK_TOOLS=/home/pi/starlink-grpc-tools
+ExecStart=/home/pi/deltapi-venv/bin/python /home/pi/deltapi/starlink_poll.py
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
