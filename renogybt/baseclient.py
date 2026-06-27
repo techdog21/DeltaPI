@@ -2,8 +2,8 @@ import asyncio
 import configparser
 import logging
 import traceback
-from .BLEManager import BLEManager
-from .Utils import bytes_to_int, crc16_modbus, int_to_bytes
+from .blemanager import BLEManager
+from .utils import bytes_to_int, crc16_modbus, int_to_bytes
 
 # Base class that works with all Renogy family devices
 # Should be extended by each client with its own parsers and section definitions

@@ -1112,7 +1112,7 @@ def index():
         if any(t < 32 for t in lows):
             weather_html += '<div class="metric"><span class="metric-label">Freeze</span><span class="metric-value"><span class="pill red">Freeze risk — heater may run</span></span></div>'
     else:
-        weather_html = '<p style="color:var(--text-muted);font-size:12px;">No location — enable location sharing in the Starlink app, or set HOME_LAT / HOME_LON on the server.</p>'
+        weather_html = '<div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill gray">No location</span></span></div>'
 
     # Disk status
     data_percent, data_class, data_label = get_disk_status(DB_DIR)

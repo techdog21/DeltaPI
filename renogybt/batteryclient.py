@@ -1,5 +1,5 @@
-from .BaseClient import BaseClient
-from .Utils import bytes_to_int, format_temperature
+from .baseclient import BaseClient
+from .utils import bytes_to_int, format_temperature
 
 # Client for Renogy LFP battery with built-in bluetooth / BT-2 module
 
