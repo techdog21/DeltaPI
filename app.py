@@ -1138,10 +1138,14 @@ def index():
         cur = battery.get("current") or 0   # bank net current, + = charging
         rem = battery.get("remaining_ah") or 0
         cap = battery.get("capacity_ah") or 0
-        if cur > 0.2 and cap > rem:
-            ttf_str = humanize_minutes((cap - rem) / cur * 60)
-        elif soc_percent and soc_percent >= 99:
+        if soc_percent and soc_percent >= 99:
             ttf_str = "Full"
+        elif cur <= 0.2:
+            ttf_str = "—"                       # not meaningfully charging (idle / discharging)
+        elif soc_percent and soc_percent >= 90:
+            ttf_str = "Topping off"             # absorption/float taper -> linear estimate is unreliable
+        elif cap > rem:
+            ttf_str = humanize_minutes((cap - rem) / cur * 60)  # bulk stage: ~constant current, linear is fair
 
     # ---- Starlink connectivity (dish status via starlink_poll, merged by logger) ----
     starlink = None
