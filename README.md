@@ -31,7 +31,10 @@ solar production, which has no "bad" state — green = producing, gray = off).
   pill, temperature (with a LiFePO4 cold-charge warning), cell balance, consumption
   (W and A), runtime, time-to-full.
 - **Solar System**: data freshness, controller health (VE.Direct `ERR`), charge mode
-  (Bulk/Absorption/Float), solar power (W and A), yield today, panel voltage.
+  (Bulk/Absorption/Float), solar power (W and A), yield today, panel voltage, and a
+  **Sustainability Outlook** — Self-sufficient / Sustaining / Drawing down ~N days /
+  Critical — fusing measured daily harvest vs. consumption with the solar forecast
+  (see [Runtime & consumption](#runtime--consumption)).
 - **Starlink**: connection status, obstruction %, alerts (mast-not-vertical, thermal,
   roaming, water…), throughput, latency.
 - **Weather**: current conditions, cloud cover, tomorrow's charging outlook, freeze
@@ -85,6 +88,16 @@ The MPPT can't see house load, so:
    trailing 72 h window (lifetime yield `H19` minus voltage-based stored-energy change),
    shown labeled `(est)`. Measured last-known values are preferred over this when
    available, so the blunt estimate rarely appears.
+
+`Runtime` is deliberately a *battery-only, "if the sun vanished now"* figure. For the
+question that actually matters off-grid — **am I in surplus or deficit going forward?**
+— the Solar panel's **Sustainability Outlook** fuses three horizons: *now* (is the
+battery charging?), *multi-day* (measured daily harvest vs. consumption → a buffer in
+**days**, not hours, when in deficit), and the *solar forecast* (can the sun keep up?).
+States: **Self-sufficient** (building/holding surplus), **Sustaining** (break-even),
+**Drawing down ~N days** (deficit; annotated *recovering* when the forecast turns it
+around), and **Critical** (low SOC with no sun coming). It shows **Gathering data**
+until there's enough daily history to judge.
 
 ## Environment variables
 

@@ -297,6 +297,50 @@ def fmt_runtime(draw_w, battery_wh, tag=""):
     span = f"{h / 24:.1f} d" if h >= 48 else (f"{h:.1f} h" if h >= 1 else f"{int(h * 60)} min")
     return f"{span} @ {draw_w:.0f}W{tag}"
 
+def _avg_complete_days(values, n=7):
+    """Average of recent COMPLETE days, dropping the most recent (still-partial)
+    day, over up to n days. Same unit in/out. None when history is too thin."""
+    if not values or len(values) < 2:
+        return None
+    vals = values[:-1][-n:]          # drop today's partial value, keep last n complete days
+    return sum(vals) / len(vals) if vals else None
+
+def sustainability_outlook(batt_present, soc, charging_now, usable_wh,
+                           avg_harvest_wh, avg_cons_wh, forecast_tier):
+    """Forward-looking energy state for the Solar panel, fusing three horizons:
+    now (is the battery charging?), multi-day (measured daily harvest vs
+    consumption), and the solar forecast (can the sun keep up?). Returns
+    (pill_class, label)."""
+    if not batt_present:
+        return ("gray", "—")
+    poor = forecast_tier == "poor"
+    good = forecast_tier == "good"
+    have_bal = avg_harvest_wh is not None and avg_cons_wh and avg_cons_wh > 0
+    balance = (avg_harvest_wh - avg_cons_wh) if have_bal else None  # Wh/day, + = surplus
+
+    # Low battery with no sun coming = the one hard countdown.
+    if soc is not None and soc <= 25 and poor:
+        return ("red", "Critical")
+
+    # Preferred: the real multi-day energy balance, once enough history exists.
+    if have_bal:
+        if balance < -0.05 * avg_cons_wh:   # spending more than we harvest, day over day
+            days = (usable_wh / -balance) if usable_wh > 0 else None
+            label = f"Drawing down ~{days:.0f}d" if days else "Drawing down"
+            if good and charging_now:
+                return ("yellow", label + " · recovering")
+            return ("red" if (days is not None and days < 2) else "yellow", label)
+        if balance >= 0.05 * avg_cons_wh and not poor:
+            return ("green", "Self-sufficient")     # building surplus
+        return ("green", "Sustaining")              # break-even / full but a thin forecast
+
+    # Thin history: fall back to the instantaneous signal, honestly.
+    if soc is not None and soc >= 95 and charging_now and not poor:
+        return ("green", "Self-sufficient")         # full and being held there by the sun
+    if charging_now and not poor:
+        return ("green", "Sustaining")              # solar currently covering the load
+    return ("gray", "Gathering data")               # discharging, can't yet judge the balance
+
 # WMO weather codes -> short labels (Open-Meteo current/daily weather_code)
 WMO_CODES = {
     0: "Clear", 1: "Mostly clear", 2: "Partly cloudy", 3: "Overcast",
@@ -1083,6 +1127,7 @@ def index():
     else:
         wx_lat, wx_lon = HOME_LAT, HOME_LON              # home / can't tell -> home coords
     wx = get_weather(wx_lat, wx_lon)
+    forecast_tier = "unknown"   # solar forecast tier, feeds the Sustainability Outlook
     if wx:
         cur = wx.get("current") or {}
         daily = wx.get("daily") or {}
@@ -1094,13 +1139,13 @@ def index():
         tomo_cond = WMO_CODES.get(codes[1], "—") if len(codes) > 1 else "—"
         tomo_rad = rad[1] if len(rad) > 1 else None
         if tomo_rad is None:
-            chg_class, chg_label = "gray", "—"
+            chg_class, chg_label, forecast_tier = "gray", "—", "unknown"
         elif tomo_rad >= 18:
-            chg_class, chg_label = "green", "Good sun"
+            chg_class, chg_label, forecast_tier = "green", "Good sun", "good"
         elif tomo_rad >= 8:
-            chg_class, chg_label = "yellow", "Fair"
+            chg_class, chg_label, forecast_tier = "yellow", "Fair", "fair"
         else:
-            chg_class, chg_label = "red", "Poor"
+            chg_class, chg_label, forecast_tier = "red", "Poor", "poor"
         temp_str = f"{wx_temp:.0f}°F" if wx_temp is not None else "—"
         cloud_str = f"{wx_cloud}%" if wx_cloud is not None else "—"
         weather_html = (
@@ -1113,6 +1158,23 @@ def index():
             weather_html += '<div class="metric"><span class="metric-label">Freeze</span><span class="metric-value"><span class="pill red">Freeze risk — heater may run</span></span></div>'
     else:
         weather_html = '<div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill gray">No location</span></span></div>'
+
+    # Sustainability Outlook (Solar panel): fuse measured daily harvest vs
+    # consumption, the current charge state, and the solar forecast into one
+    # forward-looking state (Self-sufficient / Sustaining / Drawing down / Critical).
+    ah = _avg_complete_days(h20_values)    # avg recent daily harvest (kWh)
+    ac = _avg_complete_days(cons_values)   # avg recent daily consumption (kWh)
+    net_w = battery.get("power") if batt_present else None   # + = charging
+    charging_now = bool(is_charging) or (net_w is not None and net_w >= 0)
+    outlook_class, outlook_label = sustainability_outlook(
+        batt_present,
+        soc_percent if batt_present else None,
+        charging_now,
+        usable_wh,
+        ah * 1000 if ah is not None else None,
+        ac * 1000 if ac is not None else None,
+        forecast_tier,
+    )
 
     # Disk status
     data_percent, data_class, data_label = get_disk_status(DB_DIR)
@@ -1454,6 +1516,7 @@ def index():
         <div class="metric"><span class="metric-label">Solar power</span><span class="metric-value">{solar_now} W ({charge_now_a:.1f} A) <span class="pill {solar_class}">{solar_label}</span></span></div>
         <div class="metric"><span class="metric-label">Yield today</span><span class="metric-value">{today_yield:.2f} kWh</span></div>
         <div class="metric"><span class="metric-label">Panel V</span><span class="metric-value">{latest_vpv:.2f} V <span class="pill {vpv_color}">{vpv_message}</span></span></div>
+        <div class="metric"><span class="metric-label">Sustainability Outlook</span><span class="metric-value"><span class="pill {outlook_class}">{outlook_label}</span></span></div>
     </div>
 
     <!-- Starlink -->
