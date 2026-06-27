@@ -116,6 +116,16 @@ MAX_DAYS = 30  # matches the 30-day retention enforced by cleanup_old_records
 BATTERY_CAPACITY_WH = 200 * 12   # 200 Ah @ 12 V nominal pack (estimate fallback only)
 SOC_FLOOR = 10                   # don't plan usable capacity below ~10% on LiFePO4
 LOAD_WINDOW_HOURS = 72           # trailing window for the empirical load estimate
+
+def _env_float(name):
+    try:
+        return float(os.environ[name])
+    except Exception:
+        return None
+# Fallback weather location (set in the Render dashboard) used when the Starlink
+# dish isn't sharing GPS yet. Kept out of the repo for privacy.
+HOME_LAT = _env_float("HOME_LAT")
+HOME_LON = _env_float("HOME_LON")
 _last_cleanup = 0
 _cleanup_lock = threading.Lock()
 MT = ZoneInfo("America/Denver")
@@ -1062,8 +1072,12 @@ def index():
     sl_speed_str = f"{sl_down:.1f}↓ / {sl_up:.1f}↑ Mbps" if sl_down is not None else "—"
     sl_latency_str = f"{sl_latency:.0f} ms" if sl_latency is not None else "—"
 
-    # ---- Weather (Open-Meteo; location comes from the dish, once enabled) ----
-    wx = get_weather(starlink.get("lat"), starlink.get("lon")) if starlink else None
+    # ---- Weather (Open-Meteo) — dish GPS if shared, else the configured home fallback ----
+    wx_lat = (starlink or {}).get("lat")
+    wx_lon = (starlink or {}).get("lon")
+    if wx_lat is None:
+        wx_lat, wx_lon = HOME_LAT, HOME_LON
+    wx = get_weather(wx_lat, wx_lon)
     if wx:
         cur = wx.get("current") or {}
         daily = wx.get("daily") or {}
@@ -1092,10 +1106,8 @@ def index():
         )
         if any(t < 32 for t in lows):
             weather_html += '<div class="metric"><span class="metric-label">Freeze</span><span class="metric-value"><span class="pill red">Freeze risk — heater may run</span></span></div>'
-    elif starlink and starlink.get("lat") is None:
-        weather_html = '<p style="color:var(--text-muted);font-size:12px;">Enable location sharing in the Starlink app ("Allow access on local network") to show weather.</p>'
     else:
-        weather_html = '<p style="color:var(--text-muted);font-size:12px;">No location yet.</p>'
+        weather_html = '<p style="color:var(--text-muted);font-size:12px;">No location — enable location sharing in the Starlink app, or set HOME_LAT / HOME_LON on the server.</p>'
 
     # Disk status
     data_percent, data_class, data_label = get_disk_status(DB_DIR)
