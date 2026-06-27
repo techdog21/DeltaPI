@@ -1451,8 +1451,7 @@ def index():
         <div class="metric"><span class="metric-label">Solar data</span><span class="metric-value"><span class="pill {status_color}">{status_text}</span></span></div>
         <div class="metric"><span class="metric-label">Controller</span><span class="metric-value"><span class="pill {ctrl_class}">{ctrl_label}</span></span></div>
         <div class="metric"><span class="metric-label">Mode</span><span class="metric-value"><span class="pill {mode_class}">{mode_label}</span></span></div>
-        <div class="metric"><span class="metric-label">Solar power</span><span class="metric-value">{solar_now} W <span class="pill {solar_class}">{solar_label}</span></span></div>
-        <div class="metric"><span class="metric-label">Charge current</span><span class="metric-value">{charge_now_a:.1f} A</span></div>
+        <div class="metric"><span class="metric-label">Solar power</span><span class="metric-value">{solar_now} W ({charge_now_a:.1f} A) <span class="pill {solar_class}">{solar_label}</span></span></div>
         <div class="metric"><span class="metric-label">Yield today</span><span class="metric-value">{today_yield:.2f} kWh</span></div>
         <div class="metric"><span class="metric-label">Panel V</span><span class="metric-value">{latest_vpv:.2f} V <span class="pill {vpv_color}">{vpv_message}</span></span></div>
     </div>
