@@ -1,5 +1,5 @@
 """
-DeltaPi Solar Monitor Server (Flask App)
+DeltaPi Camping Monitor Server (Flask App)
 ----------------------------------------
 This Flask application collects, stores, and visualizes solar charge controller data
 and Raspberry Pi system health for off-grid solar monitoring systems such as those
@@ -109,7 +109,7 @@ FERNET_KEY = os.environ.get("FERNET_KEY")
 if not FERNET_KEY:
     logging.warning("FERNET_KEY is not set — /encrypt_days will be unavailable")
 fernet = Fernet(FERNET_KEY.encode()) if FERNET_KEY else None
-MAX_DAYS = 30  # matches the 30-day retention enforced by cleanup_old_records
+MAX_DAYS = 365  # matches the 365-day retention enforced by cleanup_old_records
 # Battery / runtime model. The MPPT reports only charge current (never house
 # load), so consumption is derived from energy balance instead — see
 # estimate_avg_load_w(). Constants below were calibrated against ~14 days of
@@ -128,6 +128,7 @@ def _env_float(name):
 HOME_LAT = _env_float("HOME_LAT")
 HOME_LON = _env_float("HOME_LON")
 HOME_DISH_ID = os.environ.get("HOME_DISH_ID")  # round home dish id -> use HOME_LAT/LON
+FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY")  # NASA FIRMS wildfire detections (free signup)
 _last_cleanup = 0
 _cleanup_lock = threading.Lock()
 MT = ZoneInfo("America/Denver")
@@ -227,14 +228,14 @@ def get_disk_status(path="/"):
 
 def cleanup_old_records():
     """
-    Deletes log records older than 30 days and pi_status records older than 7 days.
+    Deletes log records older than 365 days and pi_status records older than 7 days.
     Uses get_db() for connection management. Throttled to run once per 24 hours
     via the _last_cleanup module-level variable in the /log and /log/bulk routes.
     """
     conn = get_db()
     # Timestamps are stored as ISO-8601 (e.g. 2026-04-29T12:34:56.789012+00:00),
     # so the cutoff must use the same format for lexicographic comparison to work.
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=365)).isoformat()
     deleted_logs = conn.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff,)).rowcount
     status_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     deleted_status = conn.execute("DELETE FROM pi_status WHERE timestamp < ?", (status_cutoff,)).rowcount
@@ -365,7 +366,8 @@ def get_weather(lat, lon):
     try:
         resp = requests.get("https://api.open-meteo.com/v1/forecast", params={
             "latitude": lat, "longitude": lon,
-            "current": "temperature_2m,relative_humidity_2m,dew_point_2m,cloud_cover,weather_code,wind_speed_10m,wind_gusts_10m",
+            "current": "temperature_2m,relative_humidity_2m,dew_point_2m,cloud_cover,weather_code,wind_speed_10m,wind_gusts_10m,precipitation,cape",
+            "minutely_15": "precipitation",
             "daily": "weather_code,temperature_2m_min,shortwave_radiation_sum,sunrise,sunset",
             "temperature_unit": "fahrenheit", "wind_speed_unit": "mph",
             "timezone": "auto", "forecast_days": 2,
@@ -449,6 +451,231 @@ def get_nws_alerts(lat, lon):
         return alerts
     except Exception as e:
         server_log("GET", f"nws alerts fetch failed: {e}", "warning")
+        return cached[1] if cached else None
+
+# ---- Geo helpers (miles + compass bearing) for proximity-based enrichment ----
+def _haversine_mi(lat1, lon1, lat2, lon2):
+    """Great-circle distance in miles between two lat/lon points."""
+    r = 3958.8
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return r * 2 * math.asin(math.sqrt(a))
+
+_COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+def _bearing(lat1, lon1, lat2, lon2):
+    """Compass heading (N/NE/.../NW) from point 1 toward point 2."""
+    dl = math.radians(lon2 - lon1)
+    y = math.sin(dl) * math.cos(math.radians(lat2))
+    x = (math.cos(math.radians(lat1)) * math.sin(math.radians(lat2))
+         - math.sin(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.cos(dl))
+    brg = (math.degrees(math.atan2(y, x)) + 360) % 360
+    return _COMPASS[int((brg + 22.5) // 45) % 8]
+
+_place_cache = {}  # (lat, lon) -> (epoch, label)
+
+def get_place(lat, lon):
+    """Coarse 'Town, ST' label for a point via BigDataCloud's free no-key
+    reverse-geocode API, cached ~6 h. Returns a string or None."""
+    if lat is None or lon is None:
+        return None
+    key = (round(lat, 2), round(lon, 2))
+    cached = _place_cache.get(key)
+    if cached and time_module.time() - cached[0] < 21600:
+        return cached[1]
+    try:
+        d = requests.get("https://api.bigdatacloud.net/data/reverse-geocode-client",
+                         params={"latitude": lat, "longitude": lon, "localityLanguage": "en"},
+                         timeout=8).json() or {}
+        town = d.get("city") or d.get("locality") or ""
+        code = d.get("principalSubdivisionCode") or ""    # e.g. 'US-UT'
+        st = code.split("-")[-1] if "-" in code else (d.get("principalSubdivision") or "")
+        label = ", ".join(p for p in (town, st) if p) or d.get("countryName") or None
+        _place_cache[key] = (time_module.time(), label)
+        return label
+    except Exception as e:
+        server_log("GET", f"reverse geocode failed: {e}", "warning")
+        return cached[1] if cached else None
+
+_fire_cache = {}  # (lat, lon) -> (epoch, dict)
+
+def get_wildfires(lat, lon):
+    """Active fire detections near a point (NASA FIRMS, VIIRS NOAA-20 NRT, last
+    24 h), cached ~30 min. Needs a free FIRMS_MAP_KEY. Returns
+    {'nearest_mi','bearing','count'} (count within 60 mi), {} when none nearby,
+    or None (no key / no location / fetch failure)."""
+    if lat is None or lon is None or not FIRMS_MAP_KEY:
+        return None
+    key = (round(lat, 1), round(lon, 1))
+    cached = _fire_cache.get(key)
+    if cached and time_module.time() - cached[0] < 1800:
+        return cached[1]
+    w, s, e, n = lon - 1.5, lat - 1.5, lon + 1.5, lat + 1.5    # ~100 mi box
+    url = (f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{FIRMS_MAP_KEY}"
+           f"/VIIRS_NOAA20_NRT/{w:.3f},{s:.3f},{e:.3f},{n:.3f}/1")
+    try:
+        rows = [r for r in requests.get(url, timeout=10).text.splitlines() if r.strip()]
+        result = {}
+        if len(rows) > 1 and "," in rows[0]:
+            hdr = rows[0].split(",")
+            li, lo = hdr.index("latitude"), hdr.index("longitude")
+            ci = hdr.index("confidence") if "confidence" in hdr else None
+            pts = []
+            for row in rows[1:]:
+                c = row.split(",")
+                if ci is not None and len(c) > ci and c[ci].strip().lower() in ("l", "low"):
+                    continue                                  # drop low-confidence detections
+                try:
+                    pts.append((float(c[li]), float(c[lo])))
+                except (ValueError, IndexError):
+                    continue
+            if pts:
+                dists = sorted((_haversine_mi(lat, lon, a, b), a, b) for a, b in pts)
+                d0, a0, b0 = dists[0]
+                result = {"nearest_mi": d0, "bearing": _bearing(lat, lon, a0, b0),
+                          "count": sum(1 for d, _, _ in dists if d <= 60)}
+        _fire_cache[key] = (time_module.time(), result)
+        return result
+    except Exception as e:
+        server_log("GET", f"FIRMS fetch failed: {e}", "warning")
+        return cached[1] if cached else None
+
+_quake_cache = {}  # (lat, lon) -> (epoch, dict)
+
+def get_quake(lat, lon):
+    """Most significant earthquake within ~250 mi over the last 24 h (USGS),
+    cached ~15 min. Returns {'mag','dist_mi','bearing','mins_ago','place'},
+    {} when none, or None (no location / fetch failure)."""
+    if lat is None or lon is None:
+        return None
+    key = (round(lat, 1), round(lon, 1))
+    cached = _quake_cache.get(key)
+    if cached and time_module.time() - cached[0] < 900:
+        return cached[1]
+    try:
+        start = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        feats = (requests.get("https://earthquake.usgs.gov/fdsnws/event/1/query", params={
+            "format": "geojson", "latitude": lat, "longitude": lon, "maxradiuskm": 400,
+            "minmagnitude": 2.5, "orderby": "magnitude", "limit": 20, "starttime": start,
+        }, timeout=8).json() or {}).get("features") or []
+        result = {}
+        for f in feats:                              # orderby=magnitude -> largest first
+            p = f.get("properties") or {}
+            g = (f.get("geometry") or {}).get("coordinates") or []
+            mag = p.get("mag")
+            if mag is None or len(g) < 2 or g[0] is None:
+                continue
+            mins = None
+            if p.get("time"):
+                mins = max(0.0, (datetime.now(timezone.utc).timestamp() - p["time"] / 1000) / 60)
+            result = {"mag": mag, "dist_mi": _haversine_mi(lat, lon, g[1], g[0]),
+                      "bearing": _bearing(lat, lon, g[1], g[0]), "mins_ago": mins,
+                      "place": p.get("place")}
+            break
+        _quake_cache[key] = (time_module.time(), result)
+        return result
+    except Exception as e:
+        server_log("GET", f"USGS quake fetch failed: {e}", "warning")
+        return cached[1] if cached else None
+
+_aurora_cache = {}  # (lat, lon) -> (epoch, dict)
+
+def get_aurora(lat, lon):
+    """Overhead aurora probability (NOAA SWPC OVATION 30-min forecast) and the
+    latest planetary Kp index, cached ~20 min. Returns {'prob','kp'} or None.
+    The OVATION grid is lon-major (lon 0-359, lat -90..90), so the cell index is
+    lon*181 + (lat+90)."""
+    if lat is None or lon is None:
+        return None
+    key = (round(lat, 1), round(lon, 1))
+    cached = _aurora_cache.get(key)
+    if cached and time_module.time() - cached[0] < 1200:
+        return cached[1]
+    try:
+        coords = (requests.get("https://services.swpc.noaa.gov/json/ovation_aurora_latest.json",
+                               timeout=10).json() or {}).get("coordinates") or []
+        glat, glon = int(round(lat)), int(round(lon)) % 360
+        prob = None
+        idx = glon * 181 + (glat + 90)
+        if 0 <= idx < len(coords) and coords[idx][0] == glon and coords[idx][1] == glat:
+            prob = coords[idx][2]
+        else:
+            for c in coords:                          # fallback if the layout ever changes
+                if c[0] == glon and c[1] == glat:
+                    prob = c[2]
+                    break
+        kp = None
+        try:
+            kpd = requests.get("https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json",
+                               timeout=8).json() or []
+            last = kpd[-1] if kpd else None
+            if isinstance(last, dict):
+                kp = last.get("Kp")
+            elif isinstance(last, list) and len(last) > 1:
+                kp = float(last[1])
+        except Exception:
+            pass
+        result = {"prob": prob, "kp": kp}
+        _aurora_cache[key] = (time_module.time(), result)
+        return result
+    except Exception as e:
+        server_log("GET", f"aurora fetch failed: {e}", "warning")
+        return cached[1] if cached else None
+
+# NWS flood categories (NWPS observed.floodCategory) -> human label
+FLOOD_LABELS = {"no_flooding": "No flooding", "action": "Action stage", "minor": "Minor flood",
+                "moderate": "Moderate flood", "major": "Major flood"}
+_river_cache = {}  # (lat, lon) -> (epoch, dict)
+
+def get_river(lat, lon):
+    """Nearest active river gauge (USGS instantaneous gage height) enriched with
+    its NWS flood category (NOAA NWPS, looked up by USGS site id), cached ~30 min.
+    Returns {'name','stage','flood'}, {} when no gauge nearby, or None (no
+    location / fetch failure)."""
+    if lat is None or lon is None:
+        return None
+    key = (round(lat, 2), round(lon, 2))
+    cached = _river_cache.get(key)
+    if cached and time_module.time() - cached[0] < 1800:
+        return cached[1]
+    d = 0.6   # ~40 mi half-box
+    try:
+        ts = ((requests.get("https://waterservices.usgs.gov/nwis/iv/", params={
+            "format": "json", "siteStatus": "active", "parameterCd": "00065",
+            "bBox": f"{lon-d:.3f},{lat-d:.3f},{lon+d:.3f},{lat+d:.3f}",
+        }, timeout=10).json() or {}).get("value") or {}).get("timeSeries") or []
+        best = None  # (dist, name, stage_ft, usgs_id)
+        for sct in ts:
+            si = sct.get("sourceInfo") or {}
+            gl = (si.get("geoLocation") or {}).get("geogLocation") or {}
+            slat, slon = gl.get("latitude"), gl.get("longitude")
+            if slat is None or slon is None:
+                continue
+            vals = ((sct.get("values") or [{}])[0].get("value")) or []
+            try:
+                stage = float(vals[-1]["value"]) if vals else None
+            except (ValueError, KeyError, IndexError, TypeError):
+                stage = None
+            sid = ((si.get("siteCode") or [{}])[0].get("value"))
+            dist = _haversine_mi(lat, lon, slat, slon)
+            if best is None or dist < best[0]:
+                best = (dist, si.get("siteName"), stage, sid)
+        result = {}
+        if best:
+            _, name, stage, sid = best
+            flood = None
+            if sid:                                   # bridge USGS site -> NWPS flood category
+                try:
+                    obs = ((requests.get(f"https://api.water.noaa.gov/nwps/v1/gauges/{sid}",
+                            timeout=8).json() or {}).get("status") or {}).get("observed") or {}
+                    flood = obs.get("floodCategory")
+                except Exception:
+                    pass
+            result = {"name": name, "stage": stage, "flood": flood}
+        _river_cache[key] = (time_module.time(), result)
+        return result
+    except Exception as e:
+        server_log("GET", f"river fetch failed: {e}", "warning")
         return cached[1] if cached else None
 
 def _sl_up(sl):
@@ -591,7 +818,7 @@ def log():
     """
     Accepts a single VE.Direct solar data entry via POST.
     Requires HTTPS and Bearer token auth. Validates required fields (V, I, PPV, VPV, timestamp).
-    Triggers cleanup of records older than 30 days (throttled to once per 24 hours).
+    Triggers cleanup of records older than 365 days (throttled to once per 24 hours).
     """
     client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     if not request.is_secure:
@@ -631,7 +858,7 @@ def bulk_log():
     Accepts a bulk POST of VE.Direct solar data entries as a JSON list.
     Deduplicates by timestamp against existing records before inserting.
     Requires HTTPS and Bearer token auth. Primary data ingestion route used by the Pi.
-    Triggers cleanup of records older than 30 days (throttled to once per 24 hours).
+    Triggers cleanup of records older than 365 days (throttled to once per 24 hours).
     """
     client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     if not request.is_secure:
@@ -1128,7 +1355,19 @@ def index():
 
     if batt_present and batt_deltas:
         dmax = max(batt_deltas)
-        if dmax >= 0.10:
+        pack_v = battery.get("voltage") if battery else None
+        # Near full charge the LiFePO4 curve goes near-vertical, so cells fan out
+        # by ~0.1V while the BMS top-balances — that's expected, not a fault. Don't
+        # alarm on the spread at top-of-charge (full SOC and on the charger); a
+        # genuinely weak cell still surfaces mid-discharge, and a truly extreme
+        # spread alarms even here.
+        top_of_charge = (soc_percent is not None and soc_percent >= 99
+                         and (is_charging or (pack_v is not None and pack_v >= 13.9)))
+        if dmax >= 0.20:
+            cell_class, cell_label = "red", f"{dmax:.2f}V spread"
+        elif top_of_charge:
+            cell_class, cell_label = ("green", "Balancing") if dmax >= 0.05 else ("green", "Balanced")
+        elif dmax >= 0.10:
             cell_class, cell_label = "red", f"{dmax:.2f}V spread"
         elif dmax >= 0.05:
             cell_class, cell_label = "yellow", f"{dmax:.2f}V spread"
@@ -1270,6 +1509,18 @@ def index():
     else:
         weather_html = '<div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill gray">No location</span></span></div>'
 
+    # Location (reverse-geocoded dish GPS) as the Weather panel's first metric.
+    place = get_place(wx_lat, wx_lon)
+    if place:
+        loc_val = escape(place)
+    elif wx_lat is not None:
+        loc_val = f"{wx_lat:.2f}, {wx_lon:.2f}"
+    else:
+        loc_val = None
+    if loc_val:
+        weather_html = (f'<div class="metric"><span class="metric-label">Location</span>'
+                        f'<span class="metric-value">{loc_val}</span></div>' + weather_html)
+
     # Environment panel: severe-weather alerts (NWS), air quality (Open-Meteo),
     # and today's solar window (from the forecast's sunrise/sunset).
     environment_html = ""
@@ -1285,6 +1536,18 @@ def index():
         a_cls = "red" if SEVERITY_RANK.get(top.get("severity"), 0) >= 3 else "yellow"
         environment_html += f'<div class="metric"><span class="metric-label">Alert</span><span class="metric-value"><span class="pill {a_cls}">{escape((top.get("event") or "Alert") + extra)}</span></span></div>'
 
+    # Wildfire proximity (NASA FIRMS) — actual fire detections, vs the AQI/PM2.5 smoke proxy.
+    fires = get_wildfires(wx_lat, wx_lon)
+    if fires is None:
+        environment_html += '<div class="metric"><span class="metric-label">Wildfire</span><span class="metric-value"><span class="pill gray">—</span></span></div>'
+    elif not fires:
+        environment_html += '<div class="metric"><span class="metric-label">Wildfire</span><span class="metric-value"><span class="pill green">None within 60 mi</span></span></div>'
+    else:
+        nm, brg, cnt = fires["nearest_mi"], fires["bearing"], fires["count"]
+        f_cls, f_lbl = ("red", "Close") if nm <= 10 else ("yellow", "Nearby") if nm <= 50 else ("green", "Distant")
+        more = f" · {cnt} within 60 mi" if cnt > 1 else ""
+        environment_html += f'<div class="metric"><span class="metric-label">Wildfire</span><span class="metric-value">{nm:.0f} mi {brg}{more} <span class="pill {f_cls}">{f_lbl}</span></span></div>'
+
     aq = (get_air_quality(wx_lat, wx_lon) or {}).get("current") or {}
     aqi, pm = aq.get("us_aqi"), aq.get("pm2_5")
     if aqi is None:
@@ -1293,6 +1556,44 @@ def index():
         aq_cls, aq_lbl = next((c, l) for mx, c, l in AQI_BANDS if aqi <= mx)
         pm_str = f" · PM2.5 {pm:.0f}" if pm is not None else ""
         environment_html += f'<div class="metric"><span class="metric-label">Air quality</span><span class="metric-value">AQI {aqi:.0f}{pm_str} <span class="pill {aq_cls}">{aq_lbl}</span></span></div>'
+
+    # Recent earthquake nearby (USGS) — most significant within ~250 mi over 24 h.
+    quake = get_quake(wx_lat, wx_lon)
+    if quake is None:
+        environment_html += '<div class="metric"><span class="metric-label">Earthquake</span><span class="metric-value"><span class="pill gray">—</span></span></div>'
+    elif not quake:
+        environment_html += '<div class="metric"><span class="metric-label">Earthquake</span><span class="metric-value"><span class="pill green">None nearby</span></span></div>'
+    else:
+        mag, qd, qb, mins = quake["mag"], quake["dist_mi"], quake["bearing"], quake["mins_ago"]
+        q_cls = "red" if (mag >= 5 and qd <= 100) else "yellow" if mag >= 4 else "gray"
+        when = ""
+        if mins is not None:
+            when = f" · {mins / 60:.0f}h ago" if mins >= 90 else f" · {mins:.0f}m ago"
+        q_pill = f' <span class="pill {q_cls}">{"Strong" if q_cls == "red" else "Notable"}</span>' if q_cls != "gray" else ""
+        environment_html += f'<div class="metric"><span class="metric-label">Earthquake</span><span class="metric-value">M{mag:.1f} · {qd:.0f} mi {qb}{when}{q_pill}</span></div>'
+
+    # Storm nowcast — thunderstorm / next-hour precipitation from Open-Meteo.
+    if wx:
+        cur = wx.get("current") or {}
+        m15 = wx.get("minutely_15") or {}
+        mt, mp = m15.get("time") or [], m15.get("precipitation") or []
+        off = wx.get("utc_offset_seconds") or 0
+        local_now = (datetime.now(timezone.utc).replace(tzinfo=None)
+                     + timedelta(seconds=off)).strftime("%Y-%m-%dT%H:%M")
+        soon = sum((mp[i] or 0) for i in [j for j, t in enumerate(mt) if t >= local_now][:4] if i < len(mp))
+        thunder = cur.get("weather_code") in (95, 96, 99)
+        precip_now, cape = cur.get("precipitation"), cur.get("cape")
+        if thunder:
+            s_cls, s_lbl = "red", "Thunderstorm now"
+        elif precip_now and precip_now > 0:
+            s_cls, s_lbl = "yellow", "Raining now"
+        elif soon > 0.1:
+            s_cls, s_lbl = "yellow", "Rain within the hour"
+        elif cape is not None and cape >= 1500:
+            s_cls, s_lbl = "yellow", "Thunderstorm potential"
+        else:
+            s_cls, s_lbl = "green", "Calm"
+        environment_html += f'<div class="metric"><span class="metric-label">Storm nowcast</span><span class="metric-value"><span class="pill {s_cls}">{s_lbl}</span></span></div>'
 
     # Weather-derived environment rows (only when we have a location/forecast).
     if wx:
@@ -1317,6 +1618,21 @@ def index():
         if low0 is not None:
             environment_html += f'<div class="metric"><span class="metric-label">Tonight\'s low</span><span class="metric-value">{low0:.0f}°F</span></div>'
 
+    # Nearest river gauge + NWS flood status (USGS gage height + NOAA NWPS).
+    # Omitted when no gauge is nearby (common away from rivers).
+    river = get_river(wx_lat, wx_lon)
+    if river:
+        rname = (river.get("name") or "River").split(",")[0]
+        if len(rname) > 32:
+            rname = rname[:31] + "…"
+        flood, stage = river.get("flood"), river.get("stage")
+        st_str = f"{stage:.1f} ft" if stage is not None else "—"
+        r_cls = ("red" if flood in ("major", "moderate")
+                 else "yellow" if flood in ("minor", "action")
+                 else "green" if flood == "no_flooding" else "gray")
+        environment_html += f'<div class="metric"><span class="metric-label">River</span><span class="metric-value">{escape(rname)} · {st_str} <span class="pill {r_cls}">{FLOOD_LABELS.get(flood, "—")}</span></span></div>'
+
+    sun_is_down = None              # set by the solar-window block below; feeds Stargazing
     window_str = "—"
     if wx:
         daily = wx.get("daily") or {}
@@ -1328,11 +1644,11 @@ def index():
                 sr_dt, ss_dt = datetime.fromisoformat(sr), datetime.fromisoformat(ss)
                 local_now = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=off)
                 if local_now < sr_dt:
-                    tail = " · before sunrise"
+                    tail, sun_is_down = " · before sunrise", True
                 elif local_now > ss_dt:
-                    tail = " · sun down"
+                    tail, sun_is_down = " · sun down", True
                 else:
-                    tail = f" · {(ss_dt - local_now).total_seconds() / 3600:.1f} h left"
+                    tail, sun_is_down = f" · {(ss_dt - local_now).total_seconds() / 3600:.1f} h left", False
                 window_str = f"{fmt_clock(sr_dt)}–{fmt_clock(ss_dt)}{tail}"
                 # Fold TODAY's remaining sun into the Sustainability Outlook tier (the
                 # sun can keep us up if there's good sun left today OR a good tomorrow).
@@ -1356,6 +1672,41 @@ def index():
         environment_html += f'<div class="metric"><span class="metric-label">Elevation</span><span class="metric-value">{wx["elevation"] * 3.28084:,.0f} ft</span></div>'
     mp_name, mp_illum = moon_phase(datetime.now(timezone.utc))
     environment_html += f'<div class="metric"><span class="metric-label">Moon</span><span class="metric-value">{mp_name} · {mp_illum}%</span></div>'
+
+    # Aurora — overhead probability + planetary Kp (NOAA SWPC). Green = likely visible.
+    aurora = get_aurora(wx_lat, wx_lon)
+    if aurora and (aurora.get("prob") is not None or aurora.get("kp") is not None):
+        prob, kp = aurora.get("prob"), aurora.get("kp")
+        parts = []
+        if kp is not None:
+            parts.append(f"Kp {kp:.0f}")
+        if prob is not None:
+            parts.append(f"{prob:.0f}% overhead")
+        if prob is not None and prob >= 30:
+            au_cls, au_lbl = "green", "Likely"
+        elif prob is not None and prob >= 10:
+            au_cls, au_lbl = "yellow", "Possible"
+        elif kp is not None and kp >= 5:
+            au_cls, au_lbl = "yellow", "Storm"
+        else:
+            au_cls, au_lbl = "gray", "Quiet"
+        environment_html += f'<div class="metric"><span class="metric-label">Aurora</span><span class="metric-value">{" · ".join(parts)} <span class="pill {au_cls}">{au_lbl}</span></span></div>'
+
+    # Stargazing score — clear skies × low moon, only meaningful after dark.
+    cloud_now = ((wx.get("current") or {}).get("cloud_cover")) if wx else None
+    if cloud_now is not None:
+        score = ((100 - cloud_now) / 100.0) * (1 - 0.6 * (mp_illum / 100.0)) * 100
+        if sun_is_down is False:
+            sg_cls, sg_lbl = "gray", "Daytime"
+        elif score >= 65:
+            sg_cls, sg_lbl = "green", "Excellent"
+        elif score >= 45:
+            sg_cls, sg_lbl = "green", "Good"
+        elif score >= 25:
+            sg_cls, sg_lbl = "yellow", "Fair"
+        else:
+            sg_cls, sg_lbl = "gray", "Poor"
+        environment_html += f'<div class="metric"><span class="metric-label">Stargazing</span><span class="metric-value"><span class="pill {sg_cls}">{sg_lbl}</span></span></div>'
 
     # Sustainability Outlook (Solar panel): fuse measured daily harvest vs
     # consumption, the current charge state, and the solar forecast into one
@@ -1383,7 +1734,7 @@ def index():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DeltaPi Solar Monitor</title>
+    <title>DeltaPi Camping Monitor</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="apple-touch-icon" href="/static/icon.png">
     <link rel="icon" type="image/png" href="/static/icon.png">
@@ -1669,7 +2020,7 @@ def index():
 <body>
 
 <div class="header">
-    <h1>DELTAPI SOLAR MONITOR</h1>
+    <h1>DELTAPI CAMPING MONITOR</h1>
     <div class="header-controls">
         <form method="get" onsubmit="event.preventDefault(); encryptAndSubmit();">
             <label>Last</label>
@@ -1766,7 +2117,7 @@ def index():
         <div class="metric"><span class="metric-label">Updates</span><span class="metric-value">{pi_updates_val} <span class="pill {updates_class}">{updates_label}</span></span></div>
         <div class="metric"><span class="metric-label">Mem / Disk</span><span class="metric-value">{pi_memory} / {pi_disk}</span></div>
         <div class="metric"><span class="metric-label">Wi-Fi</span><span class="metric-value">{pi_ssid} {pi_wifi_signal} <span class="pill {wifi_class}">{wifi_label}</span></span></div>
-        <div class="metric"><span class="metric-label">Container</span><span class="metric-value">{data_percent}% <span class="pill {data_class}">{data_label}</span> — {existing_days}d avail</span></div>"""
+        <div class="metric"><span class="metric-label">Data storage</span><span class="metric-value">{data_percent}% used <span class="pill {data_class}">{data_label}</span> · {existing_days} of 365 d</span></div>"""
     else:
         html += """
         <h2>Pi Health</h2>
