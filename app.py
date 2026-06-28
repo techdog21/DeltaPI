@@ -129,6 +129,9 @@ HOME_LAT = _env_float("HOME_LAT")
 HOME_LON = _env_float("HOME_LON")
 HOME_DISH_ID = os.environ.get("HOME_DISH_ID")  # round home dish id -> use HOME_LAT/LON
 FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY")  # NASA FIRMS wildfire detections (free signup)
+SOLAR_KWP = _env_float("SOLAR_KWP")        # array peak kW for Forecast.Solar (e.g. 0.4 = 400 W)
+SOLAR_TILT = _env_float("SOLAR_TILT")      # panel tilt deg from horizontal (default 0 = flat roof)
+SOLAR_AZIMUTH = _env_float("SOLAR_AZIMUTH")  # panel facing, Forecast.Solar convention (0 = south)
 _last_cleanup = 0
 _cleanup_lock = threading.Lock()
 MT = ZoneInfo("America/Denver")
@@ -377,6 +380,33 @@ def get_weather(lat, lon):
         return data
     except Exception as e:
         server_log("GET", f"weather fetch failed: {e}", "warning")
+        return cached[1] if cached else None
+
+_solar_fc_cache = {}  # (lat, lon) -> (epoch, dict)
+
+def get_solar_forecast(lat, lon):
+    """Predicted PV production (kWh) for today and tomorrow from Forecast.Solar
+    (free, no key), tuned to the array via SOLAR_KWP / SOLAR_TILT / SOLAR_AZIMUTH.
+    Cached ~2 h (their free tier allows ~12 calls/h). Returns {'today','tomorrow'}
+    in kWh, or None (not configured / no location / fetch failure)."""
+    if lat is None or lon is None or not SOLAR_KWP:
+        return None
+    key = (round(lat, 2), round(lon, 2))
+    cached = _solar_fc_cache.get(key)
+    if cached and time_module.time() - cached[0] < 7200:
+        return cached[1]
+    dec = SOLAR_TILT if SOLAR_TILT is not None else 0       # flat roof default
+    az = SOLAR_AZIMUTH if SOLAR_AZIMUTH is not None else 0  # 0 = south (moot when flat)
+    url = f"https://api.forecast.solar/estimate/{lat:.4f}/{lon:.4f}/{dec:.0f}/{az:.0f}/{SOLAR_KWP:.3f}"
+    try:
+        whd = ((requests.get(url, timeout=10).json() or {}).get("result") or {}).get("watt_hours_day") or {}
+        days = sorted(whd.keys())   # ISO date keys, earliest first = today, then tomorrow
+        result = {"today": (whd[days[0]] / 1000.0) if len(days) > 0 else None,
+                  "tomorrow": (whd[days[1]] / 1000.0) if len(days) > 1 else None}
+        _solar_fc_cache[key] = (time_module.time(), result)
+        return result
+    except Exception as e:
+        server_log("GET", f"solar forecast fetch failed: {e}", "warning")
         return cached[1] if cached else None
 
 def fmt_clock(dt):
@@ -1501,9 +1531,47 @@ def index():
         weather_html = (
             f'<div class="metric"><span class="metric-label">Now</span><span class="metric-value">{escape(wx_cond)}, {temp_str}</span></div>'
             f'<div class="metric"><span class="metric-label">Cloud cover</span><span class="metric-value">{cloud_str}</span></div>'
-            f'<div class="metric"><span class="metric-label">Tomorrow</span><span class="metric-value">{escape(tomo_cond)}</span></div>'
-            f'<div class="metric"><span class="metric-label">Charging outlook</span><span class="metric-value"><span class="pill {chg_class}">{chg_label}</span></span></div>'
         )
+        # Current atmospherics (wind, humidity, storm nowcast).
+        wind, gust = cur.get("wind_speed_10m"), cur.get("wind_gusts_10m")
+        if wind is not None:
+            if gust is not None and gust >= 45:
+                w_pill = ' <span class="pill red">High wind</span>'
+            elif gust is not None and gust >= 30:
+                w_pill = ' <span class="pill yellow">Breezy</span>'
+            else:
+                w_pill = ""
+            g_str = f" · gusts {gust:.0f}" if gust is not None else ""
+            weather_html += f'<div class="metric"><span class="metric-label">Wind</span><span class="metric-value">{wind:.0f} mph{g_str}{w_pill}</span></div>'
+        rh, dew, t_now = cur.get("relative_humidity_2m"), cur.get("dew_point_2m"), cur.get("temperature_2m")
+        if rh is not None:
+            d_str = f" · dew {dew:.0f}°F" if dew is not None else ""
+            cond = ' <span class="pill yellow">Condensation likely</span>' if (
+                dew is not None and t_now is not None and (t_now - dew) < 5) else ""
+            weather_html += f'<div class="metric"><span class="metric-label">Humidity</span><span class="metric-value">{rh:.0f}%{d_str}{cond}</span></div>'
+        m15 = wx.get("minutely_15") or {}
+        mt, mp = m15.get("time") or [], m15.get("precipitation") or []
+        off = wx.get("utc_offset_seconds") or 0
+        local_now_str = (datetime.now(timezone.utc).replace(tzinfo=None)
+                         + timedelta(seconds=off)).strftime("%Y-%m-%dT%H:%M")
+        soon = sum((mp[i] or 0) for i in [j for j, t in enumerate(mt) if t >= local_now_str][:4] if i < len(mp))
+        if cur.get("weather_code") in (95, 96, 99):
+            s_cls, s_lbl = "red", "Thunderstorm now"
+        elif cur.get("precipitation"):
+            s_cls, s_lbl = "yellow", "Raining now"
+        elif soon > 0.1:
+            s_cls, s_lbl = "yellow", "Rain within the hour"
+        elif (cur.get("cape") or 0) >= 1500:
+            s_cls, s_lbl = "yellow", "Thunderstorm potential"
+        else:
+            s_cls, s_lbl = "green", "Calm"
+        weather_html += f'<div class="metric"><span class="metric-label">Storm nowcast</span><span class="metric-value"><span class="pill {s_cls}">{s_lbl}</span></span></div>'
+        # Forecast + overnight.
+        weather_html += f'<div class="metric"><span class="metric-label">Tomorrow</span><span class="metric-value">{escape(tomo_cond)}</span></div>'
+        weather_html += f'<div class="metric"><span class="metric-label">Charging outlook</span><span class="metric-value"><span class="pill {chg_class}">{chg_label}</span></span></div>'
+        low0 = (daily.get("temperature_2m_min") or [None])[0]
+        if low0 is not None:
+            weather_html += f'<div class="metric"><span class="metric-label">Tonight\'s low</span><span class="metric-value">{low0:.0f}°F</span></div>'
         if any(t < 32 for t in lows):
             weather_html += '<div class="metric"><span class="metric-label">Freeze</span><span class="metric-value"><span class="pill red">Freeze risk — heater may run</span></span></div>'
     else:
@@ -1572,51 +1640,7 @@ def index():
         q_pill = f' <span class="pill {q_cls}">{"Strong" if q_cls == "red" else "Notable"}</span>' if q_cls != "gray" else ""
         environment_html += f'<div class="metric"><span class="metric-label">Earthquake</span><span class="metric-value">M{mag:.1f} · {qd:.0f} mi {qb}{when}{q_pill}</span></div>'
 
-    # Storm nowcast — thunderstorm / next-hour precipitation from Open-Meteo.
-    if wx:
-        cur = wx.get("current") or {}
-        m15 = wx.get("minutely_15") or {}
-        mt, mp = m15.get("time") or [], m15.get("precipitation") or []
-        off = wx.get("utc_offset_seconds") or 0
-        local_now = (datetime.now(timezone.utc).replace(tzinfo=None)
-                     + timedelta(seconds=off)).strftime("%Y-%m-%dT%H:%M")
-        soon = sum((mp[i] or 0) for i in [j for j, t in enumerate(mt) if t >= local_now][:4] if i < len(mp))
-        thunder = cur.get("weather_code") in (95, 96, 99)
-        precip_now, cape = cur.get("precipitation"), cur.get("cape")
-        if thunder:
-            s_cls, s_lbl = "red", "Thunderstorm now"
-        elif precip_now and precip_now > 0:
-            s_cls, s_lbl = "yellow", "Raining now"
-        elif soon > 0.1:
-            s_cls, s_lbl = "yellow", "Rain within the hour"
-        elif cape is not None and cape >= 1500:
-            s_cls, s_lbl = "yellow", "Thunderstorm potential"
-        else:
-            s_cls, s_lbl = "green", "Calm"
-        environment_html += f'<div class="metric"><span class="metric-label">Storm nowcast</span><span class="metric-value"><span class="pill {s_cls}">{s_lbl}</span></span></div>'
-
-    # Weather-derived environment rows (only when we have a location/forecast).
-    if wx:
-        cur = wx.get("current") or {}
-        wind, gust = cur.get("wind_speed_10m"), cur.get("wind_gusts_10m")
-        if wind is not None:
-            if gust is not None and gust >= 45:
-                w_pill = ' <span class="pill red">High wind</span>'
-            elif gust is not None and gust >= 30:
-                w_pill = ' <span class="pill yellow">Breezy</span>'
-            else:
-                w_pill = ""
-            g_str = f" · gusts {gust:.0f}" if gust is not None else ""
-            environment_html += f'<div class="metric"><span class="metric-label">Wind</span><span class="metric-value">{wind:.0f} mph{g_str}{w_pill}</span></div>'
-        rh, dew, t_now = cur.get("relative_humidity_2m"), cur.get("dew_point_2m"), cur.get("temperature_2m")
-        if rh is not None:
-            d_str = f" · dew {dew:.0f}°F" if dew is not None else ""
-            cond = ' <span class="pill yellow">Condensation likely</span>' if (
-                dew is not None and t_now is not None and (t_now - dew) < 5) else ""
-            environment_html += f'<div class="metric"><span class="metric-label">Humidity</span><span class="metric-value">{rh:.0f}%{d_str}{cond}</span></div>'
-        low0 = ((wx.get("daily") or {}).get("temperature_2m_min") or [None])[0]
-        if low0 is not None:
-            environment_html += f'<div class="metric"><span class="metric-label">Tonight\'s low</span><span class="metric-value">{low0:.0f}°F</span></div>'
+    # (Wind, Humidity, Storm nowcast, Tonight's low now live in the Weather panel.)
 
     # Nearest river gauge + NWS flood status (USGS gage height + NOAA NWPS).
     # Omitted when no gauge is nearby (common away from rivers).
@@ -1633,6 +1657,7 @@ def index():
         environment_html += f'<div class="metric"><span class="metric-label">River</span><span class="metric-value">{escape(rname)} · {st_str} <span class="pill {r_cls}">{FLOOD_LABELS.get(flood, "—")}</span></span></div>'
 
     sun_is_down = None              # set by the solar-window block below; feeds Stargazing
+    sun_frac_left = None            # fraction of today's daylight remaining; feeds Solar forecast
     window_str = "—"
     if wx:
         daily = wx.get("daily") or {}
@@ -1644,10 +1669,11 @@ def index():
                 sr_dt, ss_dt = datetime.fromisoformat(sr), datetime.fromisoformat(ss)
                 local_now = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=off)
                 if local_now < sr_dt:
-                    tail, sun_is_down = " · before sunrise", True
+                    tail, sun_is_down, sun_frac_left = " · before sunrise", True, 1.0
                 elif local_now > ss_dt:
-                    tail, sun_is_down = " · sun down", True
+                    tail, sun_is_down, sun_frac_left = " · sun down", True, 0.0
                 else:
+                    sun_frac_left = (ss_dt - local_now).total_seconds() / max(1.0, (ss_dt - sr_dt).total_seconds())
                     tail, sun_is_down = f" · {(ss_dt - local_now).total_seconds() / 3600:.1f} h left", False
                 window_str = f"{fmt_clock(sr_dt)}–{fmt_clock(ss_dt)}{tail}"
                 # Fold TODAY's remaining sun into the Sustainability Outlook tier (the
@@ -1715,6 +1741,23 @@ def index():
     ac = _avg_complete_days(cons_values)   # avg recent daily consumption (kWh)
     net_w = battery.get("power") if batt_present else None   # + = charging
     charging_now = bool(is_charging) or (net_w is not None and net_w >= 0)
+
+    # Solar production forecast (Forecast.Solar): array-specific predicted kWh.
+    # When configured, refine the forecast tier from predicted kWh vs measured
+    # consumption — far more honest than the array-agnostic radiation thresholds.
+    solar_fc = get_solar_forecast(wx_lat, wx_lon)
+    solar_fc_html = ""
+    if solar_fc:
+        today_kwh, tomo_kwh = solar_fc.get("today"), solar_fc.get("tomorrow")
+        frac_left = sun_frac_left if sun_frac_left is not None else 1.0
+        forward_kwh = max((today_kwh or 0) * frac_left, tomo_kwh or 0)   # today's remaining vs tomorrow
+        if ac is not None and ac > 0:
+            forecast_tier = "good" if forward_kwh >= 1.2 * ac else "fair" if forward_kwh >= 0.8 * ac else "poor"
+        tomo_str = f"{tomo_kwh:.1f} kWh" if tomo_kwh is not None else "—"
+        fc_cls = {"good": "green", "fair": "yellow", "poor": "red"}.get(forecast_tier, "gray")
+        solar_fc_html = (f'<div class="metric"><span class="metric-label">Solar forecast</span>'
+                         f'<span class="metric-value">{tomo_str} tomorrow <span class="pill {fc_cls}">{forecast_tier.title()}</span></span></div>')
+
     outlook_class, outlook_label = sustainability_outlook(
         batt_present,
         soc_percent if batt_present else None,
@@ -2064,6 +2107,7 @@ def index():
         <div class="metric"><span class="metric-label">Mode</span><span class="metric-value"><span class="pill {mode_class}">{mode_label}</span></span></div>
         <div class="metric"><span class="metric-label">Solar power</span><span class="metric-value">{solar_now} W ({charge_now_a:.1f} A) <span class="pill {solar_class}">{solar_label}</span></span></div>
         <div class="metric"><span class="metric-label">Yield today</span><span class="metric-value">{today_yield:.2f} kWh</span></div>
+        {solar_fc_html}
         <div class="metric"><span class="metric-label">Panel V</span><span class="metric-value">{latest_vpv:.2f} V <span class="pill {vpv_color}">{vpv_message}</span></span></div>
         <div class="metric"><span class="metric-label">Sustainability Outlook</span><span class="metric-value"><span class="pill {outlook_class}">{outlook_label}</span></span></div>
     </div>
