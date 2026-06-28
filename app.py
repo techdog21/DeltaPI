@@ -129,9 +129,8 @@ HOME_LAT = _env_float("HOME_LAT")
 HOME_LON = _env_float("HOME_LON")
 HOME_DISH_ID = os.environ.get("HOME_DISH_ID")  # round home dish id -> use HOME_LAT/LON
 FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY")  # NASA FIRMS wildfire detections (free signup)
-SOLAR_KWP = _env_float("SOLAR_KWP")        # array peak kW for Forecast.Solar (e.g. 0.4 = 400 W)
-SOLAR_TILT = _env_float("SOLAR_TILT")      # panel tilt deg from horizontal (default 0 = flat roof)
-SOLAR_AZIMUTH = _env_float("SOLAR_AZIMUTH")  # panel facing, Forecast.Solar convention (0 = south)
+SOLAR_KWP = _env_float("SOLAR_KWP")        # array peak kW for the solar forecast (e.g. 0.3 = 300 W)
+SOLAR_PR = _env_float("SOLAR_PR") or 0.75  # performance ratio (system losses) for the kWh estimate
 _last_cleanup = 0
 _cleanup_lock = threading.Lock()
 MT = ZoneInfo("America/Denver")
@@ -380,33 +379,6 @@ def get_weather(lat, lon):
         return data
     except Exception as e:
         server_log("GET", f"weather fetch failed: {e}", "warning")
-        return cached[1] if cached else None
-
-_solar_fc_cache = {}  # (lat, lon) -> (epoch, dict)
-
-def get_solar_forecast(lat, lon):
-    """Predicted PV production (kWh) for today and tomorrow from Forecast.Solar
-    (free, no key), tuned to the array via SOLAR_KWP / SOLAR_TILT / SOLAR_AZIMUTH.
-    Cached ~2 h (their free tier allows ~12 calls/h). Returns {'today','tomorrow'}
-    in kWh, or None (not configured / no location / fetch failure)."""
-    if lat is None or lon is None or not SOLAR_KWP:
-        return None
-    key = (round(lat, 2), round(lon, 2))
-    cached = _solar_fc_cache.get(key)
-    if cached and time_module.time() - cached[0] < 7200:
-        return cached[1]
-    dec = SOLAR_TILT if SOLAR_TILT is not None else 0       # flat roof default
-    az = SOLAR_AZIMUTH if SOLAR_AZIMUTH is not None else 0  # 0 = south (moot when flat)
-    url = f"https://api.forecast.solar/estimate/{lat:.4f}/{lon:.4f}/{dec:.0f}/{az:.0f}/{SOLAR_KWP:.3f}"
-    try:
-        whd = ((requests.get(url, timeout=10).json() or {}).get("result") or {}).get("watt_hours_day") or {}
-        days = sorted(whd.keys())   # ISO date keys, earliest first = today, then tomorrow
-        result = {"today": (whd[days[0]] / 1000.0) if len(days) > 0 else None,
-                  "tomorrow": (whd[days[1]] / 1000.0) if len(days) > 1 else None}
-        _solar_fc_cache[key] = (time_module.time(), result)
-        return result
-    except Exception as e:
-        server_log("GET", f"solar forecast fetch failed: {e}", "warning")
         return cached[1] if cached else None
 
 def fmt_clock(dt):
@@ -1742,13 +1714,17 @@ def index():
     net_w = battery.get("power") if batt_present else None   # + = charging
     charging_now = bool(is_charging) or (net_w is not None and net_w >= 0)
 
-    # Solar production forecast (Forecast.Solar): array-specific predicted kWh.
-    # When configured, refine the forecast tier from predicted kWh vs measured
-    # consumption — far more honest than the array-agnostic radiation thresholds.
-    solar_fc = get_solar_forecast(wx_lat, wx_lon)
+    # Solar production forecast: predicted kWh derived from the Open-Meteo daily
+    # shortwave radiation we already fetch — kWh = (GHI MJ/m^2 / 3.6) * kWp * PR.
+    # For flat-mounted panels GHI is the plane-of-array irradiance, so no tilt
+    # transposition is needed. When configured, this refines the forecast tier
+    # from predicted kWh vs measured consumption. (Replaces Forecast.Solar, whose
+    # free tier read ~3x low for flat arrays.)
     solar_fc_html = ""
-    if solar_fc:
-        today_kwh, tomo_kwh = solar_fc.get("today"), solar_fc.get("tomorrow")
+    rad_fc = ((wx or {}).get("daily") or {}).get("shortwave_radiation_sum") or []
+    if SOLAR_KWP and rad_fc:
+        today_kwh = (rad_fc[0] / 3.6) * SOLAR_KWP * SOLAR_PR if rad_fc[0] is not None else None
+        tomo_kwh = (rad_fc[1] / 3.6) * SOLAR_KWP * SOLAR_PR if len(rad_fc) > 1 and rad_fc[1] is not None else None
         frac_left = sun_frac_left if sun_frac_left is not None else 1.0
         forward_kwh = max((today_kwh or 0) * frac_left, tomo_kwh or 0)   # today's remaining vs tomorrow
         if ac is not None and ac > 0:
