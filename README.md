@@ -98,7 +98,8 @@ The MPPT can't see house load, so:
 question that actually matters off-grid — **am I in surplus or deficit going forward?**
 — the Solar panel's **Sustainability Outlook** fuses three horizons: *now* (is the
 battery charging?), *multi-day* (measured daily harvest vs. consumption → a buffer in
-**days**, not hours, when in deficit), and the *solar forecast* (can the sun keep up?).
+**days**, not hours, when in deficit), and the *solar forecast* — today's remaining
+sun (radiation × daylight left) **or** tomorrow's (can the sun keep up?).
 States: **Self-sufficient** (building/holding surplus), **Sustaining** (break-even),
 **Drawing down ~N days** (deficit; annotated *recovering* when the forecast turns it
 around), and **Critical** (low SOC with no sun coming). It shows **Gathering data**

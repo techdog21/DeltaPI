@@ -1334,6 +1334,21 @@ def index():
                 else:
                     tail = f" · {(ss_dt - local_now).total_seconds() / 3600:.1f} h left"
                 window_str = f"{fmt_clock(sr_dt)}–{fmt_clock(ss_dt)}{tail}"
+                # Fold TODAY's remaining sun into the Sustainability Outlook tier (the
+                # sun can keep us up if there's good sun left today OR a good tomorrow).
+                # The Weather panel's "Charging outlook" stays tomorrow-only.
+                rad_list = daily.get("shortwave_radiation_sum") or []
+                today_rad = rad_list[0] if rad_list else None
+                tomo_rad2 = rad_list[1] if len(rad_list) > 1 else None
+                if today_rad is not None or tomo_rad2 is not None:
+                    if local_now <= sr_dt:
+                        frac = 1.0
+                    elif local_now >= ss_dt:
+                        frac = 0.0
+                    else:
+                        frac = (ss_dt - local_now).total_seconds() / max(1.0, (ss_dt - sr_dt).total_seconds())
+                    forward = max((today_rad or 0) * frac, tomo_rad2 or 0)
+                    forecast_tier = "good" if forward >= 18 else "fair" if forward >= 8 else "poor"
             except Exception:
                 window_str = "—"
     environment_html += f'<div class="metric"><span class="metric-label">Solar window</span><span class="metric-value">{window_str}</span></div>'
