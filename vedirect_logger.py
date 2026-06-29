@@ -65,6 +65,11 @@ if not POST_SECRET:
     raise SystemExit(1)
 # Ensure log directory exists
 UPLOAD_INTERVAL = 30     # 30s — upload every other loop cycle
+UPDATES_CHECK_INTERVAL = 86400  # re-check apt for available updates once a day;
+                                # loading the apt cache costs ~90 MB, far too heavy to
+                                # run on every 30s status post (it thrashed the Pi).
+_last_updates_check = 0.0       # throttle state for the apt update-count check
+_updates_cached = "unknown"
 # Cap each bulk POST well under the server's MAX_CONTENT_LENGTH (1 MB). Without
 # this, a backlog that ever grows past 1 MB (e.g. after a stretch of failed
 # uploads) gets sent in a single oversized request that the server rejects with
@@ -440,11 +445,17 @@ def send_pi_status(current_duty, fan_available=True, serial_connected=False):
     hostname = safe(["hostname"], lambda x: x.strip())
     # Get OS version
     os_version = safe(["lsb_release", "-d"], lambda x: x.strip().split(":")[1].strip() if ":" in x else x.strip())
-    # Get number of available updates
-    updates = safe(
-        ["bash", "-c", "apt list --upgradeable 2>/dev/null | wc -l"],
-        lambda x: str(int(x.strip()) - 1) + " available updates"
-    )
+    # Available-updates count. Loading the apt cache costs ~90 MB, which is brutal
+    # to run every 30s on a 415 MB Pi (it caused swap thrash) — and the count barely
+    # changes. So refresh it once a day and reuse the cached value in between.
+    global _last_updates_check, _updates_cached
+    if _last_updates_check == 0.0 or time.time() - _last_updates_check > UPDATES_CHECK_INTERVAL:
+        _updates_cached = safe(
+            ["bash", "-c", "apt list --upgradeable 2>/dev/null | wc -l"],
+            lambda x: str(int(x.strip()) - 1) + " available updates"
+        )
+        _last_updates_check = time.time()
+    updates = _updates_cached
 
     # Prepare payload for status POST
     payload = {
