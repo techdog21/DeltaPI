@@ -53,6 +53,7 @@ def poll_once():
     state.update({
         "ok": True,
         "id": status.get("id"),  # stable dish hardware id — lets the server detect "home"
+        "hardware_version": status.get("hardware_version"),  # dish model (Mini reports a distinct string)
         "state": status.get("state"),
         "obstruction_pct": round((status.get("fraction_obstructed") or 0) * 100, 2),
         "currently_obstructed": bool(status.get("currently_obstructed")),

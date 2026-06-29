@@ -1469,6 +1469,16 @@ def index():
     sl_speed_str = f"{sl_down:.1f}↓ / {sl_up:.1f}↑ Mbps" if sl_down is not None else "—"
     sl_latency_str = f"{sl_latency:.0f} ms" if sl_latency is not None else "—"
 
+    # ---- Dish model: auto-detect Mini vs Home from the reported hardware version
+    # (the Mini reports a distinct string). Raw value surfaced in the row below so
+    # we can confirm the detection against what the dish actually reports. ----
+    dish_hw = (starlink or {}).get("hardware_version")
+    if dish_hw:
+        dish_class, dish_label = "gray", ("Starlink Mini" if "mini" in dish_hw.lower() else "Starlink Home")
+    else:
+        dish_class, dish_label = "gray", "—"
+    dish_hw_suffix = f" · {escape(dish_hw)}" if dish_hw else ""
+
     # ---- Weather location: dish GPS (Mini) -> home dish id -> home coords; else unknown ----
     dish_id = (starlink or {}).get("id")
     dlat, dlon = (starlink or {}).get("lat"), (starlink or {}).get("lon")
@@ -2106,6 +2116,7 @@ def index():
     <div class="panel">
         <h2>Starlink</h2>
         <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill {sl_status_class}">{sl_status_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Dish</span><span class="metric-value"><span class="pill {dish_class}">{dish_label}</span>{dish_hw_suffix}</span></div>
         {sl_streak_html}
         <div class="metric"><span class="metric-label">Obstruction</span><span class="metric-value">{sl_obs_str} <span class="pill {sl_obs_class}">{sl_obs_label}</span></span></div>
         <div class="metric"><span class="metric-label">Alerts</span><span class="metric-value"><span class="pill {sl_alert_class}">{sl_alert_label}</span></span></div>
