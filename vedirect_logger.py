@@ -65,6 +65,9 @@ if not POST_SECRET:
     raise SystemExit(1)
 # Ensure log directory exists
 UPLOAD_INTERVAL = 30     # 30s — upload every other loop cycle
+FAN_CHECK_INTERVAL = 10  # 10s — re-read CPU temp / adjust fan. get_pi_temp() spawns a
+                         # vcgencmd subprocess, so running it every loop (~1/s) wasted
+                         # ~15% CPU; temp changes slowly, so 10s response is plenty.
 UPDATES_CHECK_INTERVAL = 86400  # re-check apt for available updates once a day;
                                 # loading the apt cache costs ~90 MB, far too heavy to
                                 # run on every 30s status post (it thrashed the Pi).
@@ -601,6 +604,7 @@ def main():
         last_prune_check = time.time()
         last_status_time = time.time()
         last_serial_retry = time.time()
+        last_fan_check = time.time()
 
         while True:
             try:
@@ -638,8 +642,12 @@ def main():
                     send_pi_status(current_duty, fan_available, serial_connected=(ser is not None))
                     last_status_time = time.time()
 
-                temp = get_pi_temp()
-                current_duty = update_fan(pwm, temp, current_duty)
+                # Throttled: get_pi_temp() spawns a vcgencmd subprocess, too costly to
+                # run every loop on a Zero 2 W. Temp drifts slowly, so 10s is plenty.
+                if time.time() - last_fan_check > FAN_CHECK_INTERVAL:
+                    temp = get_pi_temp()
+                    current_duty = update_fan(pwm, temp, current_duty)
+                    last_fan_check = time.time()
 
             except serial.SerialException as e:
                 log_error(f"[Serial] Lost connection: {e}")
