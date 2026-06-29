@@ -1714,6 +1714,19 @@ def index():
     net_w = battery.get("power") if batt_present else None   # + = charging
     charging_now = bool(is_charging) or (net_w is not None and net_w >= 0)
 
+    # Power source: infer shore/generator vs off-grid from the energy balance.
+    # The MPPT only sees solar; the battery BMS sees net current from ALL sources.
+    # If the pack is charging faster than solar can supply, an external AC charger
+    # (shore power or a generator) is doing it. This detects active charging — not
+    # mere connection — and can't tell shore from a generator.
+    ps_class, ps_label = "gray", "—"
+    if batt_present and net_w is not None:
+        solar_to_batt_w = (voltages[0] * currents[0]) if parsed else 0   # MPPT output to battery (W)
+        if net_w - solar_to_batt_w > max(25.0, 0.15 * solar_to_batt_w):
+            ps_class, ps_label = "gray", "Shore / Generator"
+        else:
+            ps_class, ps_label = "green", "Solar / Battery"
+
     # Solar production forecast: predicted kWh derived from the Open-Meteo daily
     # shortwave radiation we already fetch — kWh = (GHI MJ/m^2 / 3.6) * kWp * PR.
     # For flat-mounted panels GHI is the plane-of-array irradiance, so no tilt
@@ -2068,6 +2081,7 @@ def index():
         <div class="metric"><span class="metric-label">SOC</span><span class="metric-value">{soc_percent}% <span class="pill {soc_color}">{soc_label}</span></span></div>
         <div class="metric"><span class="metric-label">Battery V</span><span class="metric-value">{latest_voltage} <span class="pill {latest_voltage_class}">{latest_voltage_label}</span></span></div>
         <div class="metric"><span class="metric-label">Battery feed</span><span class="metric-value">{batt_per_display}<span class="pill {batt_feed_class}">{batt_feed_label}</span></span></div>
+        <div class="metric"><span class="metric-label">Power source</span><span class="metric-value"><span class="pill {ps_class}">{ps_label}</span></span></div>
         <div class="metric"><span class="metric-label">Temperature</span><span class="metric-value">{batt_temp_str} <span class="pill {btemp_class}">{btemp_label}</span></span></div>
         <div class="metric"><span class="metric-label">Cell balance</span><span class="metric-value"><span class="pill {cell_class}">{cell_label}</span></span></div>
         <div class="metric"><span class="metric-label">Consumption</span><span class="metric-value">{house_load_str}</span></div>
