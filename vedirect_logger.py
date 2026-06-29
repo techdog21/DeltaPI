@@ -83,7 +83,7 @@ if not BASE_URL:
     print("[FATAL] BASE_URL environment variable is not set. Exiting.")
     raise SystemExit(1)
 ARCHIVE_PATH = "/var/log/vedirect/solar_archive.jsonl"
-MAX_ARCHIVE_DAYS = 14
+MAX_ARCHIVE_DAYS = 7    # days of local solar backup kept on the Pi (the server keeps 365)
 ARCHIVE_PRUNE_INTERVAL = 86400  # rewrite/prune the archive at most once a day
 _last_archive_prune = 0         # set on first prune so we don't rewrite every upload
 
@@ -227,7 +227,6 @@ def bulk_upload(entries):
         headers = {"Authorization": f"Bearer {POST_SECRET}"}
         resp = requests.post(BASE_URL + "/log/bulk", json=entries, headers=headers, timeout=10)
         if resp.status_code == 200:
-            log_error(f"[Upload] Bulk POST succeeded: {resp.status_code}")
             return True
         else:
             log_error(f"[Upload] Bulk POST failed: {resp.status_code}")
@@ -261,7 +260,6 @@ def update_last_sent_offset(offset):
     try:
         with open(OFFSET_FILE, "w") as f:
             f.write(str(offset))
-        log_error(f"[Offset] Updated to {offset}")
     except Exception as e:
         log_error(f"[Offset] Save failed: {e}")
 
@@ -287,7 +285,6 @@ def prune_sent_logs():
 
         os.replace(temp_path, LOG_PATH)
         update_last_sent_offset(0)
-        log_error("[Prune] Sent logs pruned successfully")
     except Exception as e:
         log_error(f"[Prune] Failed: {e}")
 
@@ -482,9 +479,7 @@ def send_pi_status(current_duty, fan_available=True, serial_connected=False):
         # POST the status data
         r = requests.post(status_url, json=payload, headers=headers, timeout=5)
         # Check the response status
-        if r.status_code == 200:
-            log_error(f"[Status] POST succeeded: {r.status_code}")
-        else:
+        if r.status_code != 200:
             log_error(f"[Status] POST failed: {r.status_code} {r.text}")
     except Exception as e:
         log_error(f"[Status] Exception: {e}")
