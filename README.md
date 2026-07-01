@@ -56,7 +56,14 @@ solar production, which has no "bad" state — green = producing, gray = off).
 
 | Path | Runs on | Purpose |
 |---|---|---|
-| `app.py` | Render | Flask app: ingest, store, and render the dashboard |
+| `app.py` | Render | Flask entry point: ingestion routes (`/log`, `/log/bulk`, `/status`), `/encrypt_days`, and the dashboard route |
+| `config.py` | Render | Env-derived settings and static lookup tables (VE.Direct/WMO/AQI/flood maps) |
+| `util.py` | Render | Cross-cutting helpers: logging, formatters, token decryption, geo + moon math |
+| `db.py` | Render | SQLite schema, per-request connections, and throttled retention cleanup |
+| `integrations.py` | Render | Cached, failure-tolerant external providers (weather, AQI, NWS, fire, quake, aurora, river, geocode) |
+| `energy.py` | Render | Battery/solar model: SOC estimate, runtime, sustainability outlook, empirical load |
+| `dashboard.py` | Render | Builds the template context from log rows + Pi status |
+| `templates/index.html`, `static/style.css`, `static/dashboard.js` | Render | Dashboard markup, styles, and Chart.js wiring |
 | `vedirect_logger.py` | Pi (systemd `vedirect_logger`) | Read VE.Direct serial, buffer/upload, post Pi health, control the cooling fan, merge battery + Starlink state into uploads |
 | `renogy_ble.py` | Pi (systemd `renogy_ble`) | Poll the batteries over BLE → `battery_state.json` |
 | `starlink_poll.py` | Pi (systemd `starlink_poll`) | Poll the Starlink dish over gRPC → `starlink_state.json` |
@@ -79,7 +86,7 @@ affects serial logging or uploads.
   tracking (survives outages) and archived 14 days on the SD card (pruned at most
   once a day to limit wear).
 - **Backfill**: if the server DB is ever empty, the Pi replays its archive.
-- **Persistent server DB**: SQLite on a Render Disk at `/data`; 30 days of solar logs,
+- **Persistent server DB**: SQLite on a Render Disk at `/data`; 365 days of solar logs,
   7 days of Pi status, pruned daily.
 
 ## Runtime & consumption
