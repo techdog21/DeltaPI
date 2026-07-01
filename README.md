@@ -54,22 +54,34 @@ solar production, which has no "bad" state — green = producing, gray = off).
 
 ## Repo layout
 
-| Path | Runs on | Purpose |
-|---|---|---|
-| `server/app.py` | Render | Flask entry point: ingestion routes (`/log`, `/log/bulk`, `/status`), `/encrypt_days`, and the dashboard route |
-| `server/config.py` | Render | Env-derived settings and static lookup tables (VE.Direct/WMO/AQI/flood maps) |
-| `server/util.py` | Render | Cross-cutting helpers: logging, formatters, token decryption, geo + moon math |
-| `server/db.py` | Render | SQLite schema, per-request connections, and throttled retention cleanup |
-| `server/integrations.py` | Render | Cached, failure-tolerant external providers (weather, AQI, NWS, fire, quake, aurora, river, geocode) |
-| `server/energy.py` | Render | Battery/solar model: SOC estimate, runtime, sustainability outlook, empirical load |
-| `server/dashboard.py` | Render | Builds the template context from log rows + Pi status |
-| `server/templates/index.html`, `server/static/*` | Render | Dashboard markup, styles, and Chart.js wiring |
-| `server/requirements.txt` | Render | Server Python dependencies |
-| `vedirect_logger.py` | Pi (systemd `vedirect_logger`) | Read VE.Direct serial, buffer/upload, post Pi health, control the cooling fan, merge battery + Starlink state into uploads |
-| `renogy_ble.py` | Pi (systemd `renogy_ble`) | Poll the batteries over BLE → `battery_state.json` |
-| `starlink_poll.py` | Pi (systemd `starlink_poll`) | Poll the Starlink dish over gRPC → `starlink_state.json` |
-| `renogybt/` | Pi | Vendored, trimmed + patched [`cyrils/renogy-bt`](https://github.com/cyrils/renogy-bt) (battery path only; fixes the Pro batteries' duplicate-GATT-UUID notify bug) |
-| `deploy/` | Pi | systemd units, log-rotation config, and Pi-only requirement lists |
+The two deployables live in their own top-level directories: `server/` (the
+Render web app) and `pi/` (the field agent). `render.yaml` and this README stay at
+the root.
+
+**`server/` — Flask app on Render**
+
+| Path | Purpose |
+|---|---|
+| `app.py` | Flask entry point: ingestion routes (`/log`, `/log/bulk`, `/status`), `/encrypt_days`, and the dashboard route |
+| `config.py` | Env-derived settings and static lookup tables (VE.Direct/WMO/AQI/flood maps) |
+| `util.py` | Cross-cutting helpers: logging, formatters, token decryption, geo + moon math |
+| `db.py` | SQLite schema, per-request connections, and throttled retention cleanup |
+| `integrations.py` | Cached, failure-tolerant external providers (weather, AQI, NWS, fire, quake, aurora, river, geocode) |
+| `energy.py` | Battery/solar model: SOC estimate, runtime, sustainability outlook, empirical load |
+| `dashboard.py` | Builds the template context from log rows + Pi status |
+| `templates/index.html`, `static/style.css`, `static/dashboard.js` | Dashboard markup, styles, and Chart.js wiring |
+| `requirements.txt` | Server Python dependencies |
+
+**`pi/` — field agent on the Raspberry Pi**
+
+| Path | Purpose |
+|---|---|
+| `vedirect_logger.py` | (systemd `vedirect_logger`) Read VE.Direct serial, buffer/upload, post Pi health, control the cooling fan, merge battery + Starlink state into uploads |
+| `renogy_ble.py` | (systemd `renogy_ble`) Poll the batteries over BLE → `battery_state.json` |
+| `starlink_poll.py` | (systemd `starlink_poll`) Poll the Starlink dish over gRPC → `starlink_state.json` |
+| `renogybt/` | Vendored, trimmed + patched [`cyrils/renogy-bt`](https://github.com/cyrils/renogy-bt) (battery path only; fixes the Pro batteries' duplicate-GATT-UUID notify bug) |
+| `deploy.py` | One-command installer: renders the unit/logrotate templates for this machine and (re)starts the services |
+| `deploy/` | systemd unit + log-rotation templates and Pi-only requirement lists |
 
 ## Architecture
 
@@ -129,65 +141,56 @@ or `BASE_URL` is missing.
 
 ## Pi setup
 
-Assumes a clean Raspberry Pi OS. Replace `pi` / paths to match your user.
+Assumes a clean Raspberry Pi OS. `pi/deploy.py` detects the invoking user and repo
+path — nothing is hard-coded to a particular username or home directory.
 
-**1. System + serial**
+**1. System + serial + code**
 ```bash
 sudo apt update && sudo apt install -y python3-venv python3-rpi.gpio git
 sudo mkdir -p /var/log/vedirect && sudo chown $USER:$USER /var/log/vedirect
 sudo usermod -aG dialout $USER          # serial access; re-login after
 ls /dev/ttyUSB*                          # confirm /dev/ttyUSB0 (the MPPT)
 git clone https://github.com/techdog21/deltapi.git ~/deltapi
+pip3 install pyserial requests           # core-logger deps (system python3)
 ```
 
-**2. Core logger** — `pip3 install pyserial requests`, then create
-`/etc/systemd/system/vedirect_logger.service`:
-```ini
-[Unit]
-Description=DeltaPI VE.Direct Logger
-After=network-online.target
-Wants=network-online.target
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi/deltapi
-Environment="POST_SECRET=your-secret"
-Environment="BASE_URL=https://your-server.example.com"
-ExecStart=/usr/bin/python3 /home/pi/deltapi/vedirect_logger.py
-Restart=on-failure
-RestartSec=10
-[Install]
-WantedBy=multi-user.target
-```
-`sudo systemctl enable --now vedirect_logger`. Within ~30 s,
-`tail -f /var/log/vedirect/vedirect_error.log` should show `[Serial] Connected`,
-`[Status] POST succeeded`, `[Upload] Bulk POST succeeded`.
-
-**3. Log rotation**
-```bash
-sudo cp deploy/vedirect-logrotate.conf /etc/logrotate.d/vedirect   # edit its su line
-```
-
-**4. Battery (BLE) poller** — needs a venv (kept off the Render server):
+**2. Poller venv** — the BLE + Starlink pollers run in a venv (kept off the Render
+server). `deploy.py` looks for it at `~/deltapi-venv` by default.
 ```bash
 python3 -m venv ~/deltapi-venv
-~/deltapi-venv/bin/pip install -r ~/deltapi/deploy/requirements-ble.txt
+~/deltapi-venv/bin/pip install -r ~/deltapi/pi/deploy/requirements-ble.txt
+~/deltapi-venv/bin/pip install -r ~/deltapi/pi/deploy/requirements-starlink.txt
 sudo systemctl enable --now bluetooth
-# edit the battery MACs/aliases at the top of renogy_ble.py, then:
-sudo cp deploy/renogy_ble.service /etc/systemd/system/   # adjust user/paths
-sudo systemctl enable --now renogy_ble
+# edit the battery MACs/aliases at the top of pi/renogy_ble.py
+# (optional) Starlink location/throughput needs the grpc tools:
+git clone https://github.com/sparky8512/starlink-grpc-tools ~/starlink-grpc-tools
 ```
 
-**5. Starlink poller**
+**3. Install the services** — one command renders the systemd units + logrotate for
+this machine, then enables and starts them:
 ```bash
-git clone https://github.com/sparky8512/starlink-grpc-tools ~/starlink-grpc-tools
-~/deltapi-venv/bin/pip install -r ~/deltapi/deploy/requirements-starlink.txt
-sudo cp deploy/starlink_poll.service /etc/systemd/system/   # adjust user/paths
-sudo systemctl enable --now starlink_poll
+sudo python3 ~/deltapi/pi/deploy.py            # or: --dry-run to preview
 ```
-Status/obstruction/alerts work immediately. **Location → weather** also needs the
-"Starlink location" / "Allow access on local network" setting enabled in the Starlink
-app (the Mini exposes it; the older round dish may not — use `HOME_LAT/LON` there).
+On first run it writes a template `/etc/deltapi.env` (mode 600). Fill in the logger
+secrets and restart it:
+```bash
+sudo nano /etc/deltapi.env                      # set POST_SECRET and BASE_URL
+sudo systemctl restart vedirect_logger
+```
+Within ~30 s, `tail -f /var/log/vedirect/vedirect_error.log` should show
+`[Serial] Connected`, `[Status] POST succeeded`, `[Upload] Bulk POST succeeded`.
+
+**Location → weather** also needs the "Starlink location" / "Allow access on local
+network" setting enabled in the Starlink app (the Mini exposes it; the older round
+dish may not — use `HOME_LAT/LON` there).
+
+**Redeploy after a code change** — pull and re-run the installer; it refreshes the
+units and restarts the services:
+```bash
+cd ~/deltapi && git pull && sudo python3 pi/deploy.py
+```
+`deploy.py` takes optional service names (`vedirect_logger`, `renogy_ble`,
+`starlink_poll`, `logrotate`) to act on just one, plus `--dry-run` and `--no-restart`.
 
 ## Server (Render)
 

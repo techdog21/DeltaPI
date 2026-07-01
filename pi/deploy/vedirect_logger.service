@@ -1,0 +1,29 @@
+# DeltaPI VE.Direct logger — systemd unit template.
+# Reads the Victron MPPT over VE.Direct serial, buffers/uploads to the server,
+# posts Pi health, controls the cooling fan, and merges the battery + Starlink
+# state files into each upload. This is the core service; BLE and Starlink run
+# separately so their hiccups never affect serial logging.
+#
+# The __TOKENS__ below are filled in at install time by pi/deploy.py, which detects
+# the invoking user and repo paths — do not edit them by hand. Install with:
+#   sudo python3 pi/deploy.py
+#
+# Secrets are NOT stored in this unit or the repo. deploy.py writes a template
+# EnvironmentFile at __ENVFILE__ (mode 600) on first install; fill in POST_SECRET
+# and BASE_URL there, then: sudo systemctl restart vedirect_logger
+[Unit]
+Description=DeltaPI VE.Direct Logger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__WORKDIR__
+EnvironmentFile=__ENVFILE__
+ExecStart=__LOGGER_PY__ __WORKDIR__/vedirect_logger.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
