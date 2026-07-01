@@ -191,9 +191,12 @@ app (the Mini exposes it; the older round dish may not — use `HOME_LAT/LON` th
 
 ## Server (Render)
 
-- Build: `pip install -r server/requirements.txt` · Start: `gunicorn --chdir server app:app`
-- Starter plan with a 1 GB Disk mounted at `/data`
-- Set the env vars above in the Render dashboard
+Deploy via Blueprint: **New → Blueprint** in Render, point it at this repo, and
+`render.yaml` provisions the web service, the 1 GB Disk at `/data`, and the build/
+start commands. You'll be prompted for `POST_SECRET` and `FERNET_KEY` (kept out of
+the repo via `sync: false`); optional vars from the table above can be added too.
+
+- Build: `pip install -r server/requirements.txt` · Start: `gunicorn --chdir server app:app --bind 0.0.0.0:$PORT`
 - Local dev: `cd server && POST_SECRET=x FERNET_KEY=$(...) python app.py`
 
 ## Routes
