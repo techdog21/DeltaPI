@@ -2,5 +2,5 @@ services:
   - type: web
     name: vedirect-api
     env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    buildCommand: pip install -r server/requirements.txt
+    startCommand: gunicorn --chdir server app:app

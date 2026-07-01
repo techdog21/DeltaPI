@@ -1,7 +1,7 @@
 # DeltaPI — Off-Grid Camp Monitor
 
-![Dashboard — battery, solar & Starlink](static/deltapi.png)
-![Dashboard — weather, Pi health & charts](static/deltapi1.png)
+![Dashboard — battery, solar & Starlink](server/static/deltapi.png)
+![Dashboard — weather, Pi health & charts](server/static/deltapi1.png)
 
 DeltaPI started as a Victron solar monitor and grew into a single-screen **camp
 systems dashboard** for an off-grid RV: **power, connectivity, and weather** at a
@@ -56,14 +56,15 @@ solar production, which has no "bad" state — green = producing, gray = off).
 
 | Path | Runs on | Purpose |
 |---|---|---|
-| `app.py` | Render | Flask entry point: ingestion routes (`/log`, `/log/bulk`, `/status`), `/encrypt_days`, and the dashboard route |
-| `config.py` | Render | Env-derived settings and static lookup tables (VE.Direct/WMO/AQI/flood maps) |
-| `util.py` | Render | Cross-cutting helpers: logging, formatters, token decryption, geo + moon math |
-| `db.py` | Render | SQLite schema, per-request connections, and throttled retention cleanup |
-| `integrations.py` | Render | Cached, failure-tolerant external providers (weather, AQI, NWS, fire, quake, aurora, river, geocode) |
-| `energy.py` | Render | Battery/solar model: SOC estimate, runtime, sustainability outlook, empirical load |
-| `dashboard.py` | Render | Builds the template context from log rows + Pi status |
-| `templates/index.html`, `static/style.css`, `static/dashboard.js` | Render | Dashboard markup, styles, and Chart.js wiring |
+| `server/app.py` | Render | Flask entry point: ingestion routes (`/log`, `/log/bulk`, `/status`), `/encrypt_days`, and the dashboard route |
+| `server/config.py` | Render | Env-derived settings and static lookup tables (VE.Direct/WMO/AQI/flood maps) |
+| `server/util.py` | Render | Cross-cutting helpers: logging, formatters, token decryption, geo + moon math |
+| `server/db.py` | Render | SQLite schema, per-request connections, and throttled retention cleanup |
+| `server/integrations.py` | Render | Cached, failure-tolerant external providers (weather, AQI, NWS, fire, quake, aurora, river, geocode) |
+| `server/energy.py` | Render | Battery/solar model: SOC estimate, runtime, sustainability outlook, empirical load |
+| `server/dashboard.py` | Render | Builds the template context from log rows + Pi status |
+| `server/templates/index.html`, `server/static/*` | Render | Dashboard markup, styles, and Chart.js wiring |
+| `server/requirements.txt` | Render | Server Python dependencies |
 | `vedirect_logger.py` | Pi (systemd `vedirect_logger`) | Read VE.Direct serial, buffer/upload, post Pi health, control the cooling fan, merge battery + Starlink state into uploads |
 | `renogy_ble.py` | Pi (systemd `renogy_ble`) | Poll the batteries over BLE → `battery_state.json` |
 | `starlink_poll.py` | Pi (systemd `starlink_poll`) | Poll the Starlink dish over gRPC → `starlink_state.json` |
@@ -190,10 +191,10 @@ app (the Mini exposes it; the older round dish may not — use `HOME_LAT/LON` th
 
 ## Server (Render)
 
-- Build: `pip install -r requirements.txt` · Start: `gunicorn app:app`
+- Build: `pip install -r server/requirements.txt` · Start: `gunicorn --chdir server app:app`
 - Starter plan with a 1 GB Disk mounted at `/data`
 - Set the env vars above in the Render dashboard
-- Local dev: `POST_SECRET=x FERNET_KEY=$(...) python app.py`
+- Local dev: `cd server && POST_SECRET=x FERNET_KEY=$(...) python app.py`
 
 ## Routes
 
