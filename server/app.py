@@ -179,13 +179,13 @@ def pi_status():
             raise ValueError("Missing required status fields")
         conn = get_db()
         conn.execute(
-            """INSERT INTO pi_status (ip, timestamp, uptime, cpu_temp, disk, memory, ssid, wifi_signal, fan_speed, pi_name, pi_os, pi_updates, controller)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO pi_status (ip, timestamp, uptime, cpu_temp, disk, memory, ssid, wifi_signal, fan_speed, pi_name, pi_os, pi_updates, controller, cpu_load)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (client_ip, datetime.now(timezone.utc).isoformat(), payload["uptime"], payload["cpu_temp"],
              payload["disk"], payload["memory"], payload["ssid"], payload["wifi_signal"],
              payload.get("fan_speed", "unknown"), payload.get("pi_name", "unknown"),
              payload.get("pi_os", "unknown"), payload.get("pi_updates", "unknown"),
-             payload.get("controller", "unknown"))
+             payload.get("controller", "unknown"), payload.get("cpu_load", "unknown"))
         )
         conn.commit()
         return jsonify({"status": "ok"}), 200

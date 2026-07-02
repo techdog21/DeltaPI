@@ -201,17 +201,112 @@ def read_frame(ser):
 # ------------------ Helpers ------------------ #
 def get_pi_temp():
     """
-    Get the current CPU temperature of the Raspberry Pi.
+    Current CPU temperature in °C from the thermal sysfs (fast, no subprocess).
 
     Returns:
         float or None: CPU temperature in °C, or None if unavailable.
     """
     try:
-        result = subprocess.check_output(["vcgencmd", "measure_temp"]).decode()
-        temp_str = result.strip().split("=")[1].split("'")[0]
-        return float(temp_str)
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            return int(f.read().strip()) / 1000.0
     except Exception:
         return None
+
+
+# System-vitals readers for the status POST. These pull straight from the kernel
+# (/proc, /sys, statvfs, a socket) instead of forking uptime/free/df/vcgencmd every
+# 30 s — on a 415 MB Pi Zero 2 W those forks (of a ~65 MB Python process) were the
+# main steady-state CPU and memory-pressure cost. Each returns 'unknown' on failure.
+def _fmt_cpu_temp(c):
+    """Format a °C reading as 'X°C / Y°F' (matches the dashboard's parser)."""
+    if c is None:
+        return "unknown"
+    return f"{round(c, 1)}°C / {round(c * 9 / 5 + 32, 1)}°F"
+
+
+def _read_loadavg():
+    """1-minute load average from /proc/loadavg as a string (e.g. '0.42')."""
+    try:
+        with open("/proc/loadavg") as f:
+            return f.read().split()[0]
+    except Exception:
+        return "unknown"
+
+
+def _read_uptime():
+    """Human uptime like '3 days, 1 hour' from /proc/uptime."""
+    try:
+        with open("/proc/uptime") as f:
+            secs = int(float(f.read().split()[0]))
+    except Exception:
+        return "unknown"
+    d, rem = divmod(secs, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    parts = []
+    if d:
+        parts.append(f"{d} day{'s' if d != 1 else ''}")
+    if h:
+        parts.append(f"{h} hour{'s' if h != 1 else ''}")
+    if m and not d:
+        parts.append(f"{m} minute{'s' if m != 1 else ''}")
+    return ", ".join(parts) or "0 minutes"
+
+
+def _read_memory():
+    """'used/total (pct%)' in MB from /proc/meminfo (used = total - available)."""
+    try:
+        info = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                key, _, rest = line.partition(":")
+                info[key] = int(rest.split()[0])  # values in kB
+        total = info["MemTotal"] // 1024
+        avail = info.get("MemAvailable", info.get("MemFree", 0)) // 1024
+        used = total - avail
+        pct = int(used / total * 100) if total else 0
+        return f"{used}/{total} ({pct}%)"
+    except Exception:
+        return "unknown"
+
+
+def _read_disk(path="/"):
+    """'usedG/totalG (pct%)' from statvfs, matching `df -h` (GiB) closely."""
+    try:
+        st = os.statvfs(path)
+        gib = 1024 ** 3
+        total = st.f_blocks * st.f_frsize
+        avail = st.f_bavail * st.f_frsize
+        used = (st.f_blocks - st.f_bfree) * st.f_frsize
+        pct = int(round(used / (used + avail) * 100)) if (used + avail) else 0
+        return f"{used / gib:.1f}G/{total / gib:.0f}G ({pct}%)"
+    except Exception:
+        return "unknown"
+
+
+def _read_os():
+    """PRETTY_NAME from /etc/os-release."""
+    try:
+        with open("/etc/os-release") as f:
+            for line in f:
+                if line.startswith("PRETTY_NAME="):
+                    return line.split("=", 1)[1].strip().strip('"')
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _local_ip():
+    """Primary LAN IP via a dummy UDP socket (no packet is actually sent)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return "no IP"
 
 
 def bulk_upload(entries):
@@ -330,21 +425,21 @@ def upload_unsent_logs():
         log_error(f"[Upload] Bulk error: {e}")
 
 
-def get_wifi_signal_strength():
+def get_wifi_signal_strength(iface="wlan0"):
     """
-    Get the current Wi-Fi signal strength in dBm.
+    Wi-Fi signal level in dBm from /proc/net/wireless (no subprocess).
 
     Returns:
-        str: Signal strength as a string, or 'unknown' if unavailable.
+        str: e.g. '-52 dBm', or 'unknown' if unavailable.
     """
     try:
-        result = subprocess.check_output(["iwconfig", "wlan0"]).decode()
-        for line in result.splitlines():
-            if "Signal level=" in line:
-                dBm = line.strip().split("Signal level=")[1].split()[0].replace("dBm", "")
-                return f"{dBm} dBm"
+        with open("/proc/net/wireless") as f:
+            for line in f:
+                if line.strip().startswith(iface + ":"):
+                    level = line.split()[3].rstrip(".")  # 4th column = signal level (dBm)
+                    return f"{int(float(level))} dBm"
     except Exception as e:
-        log_error(f"[WiFi] Signal fetch error: {e}")
+        log_error(f"[WiFi] Signal read error: {e}")
     return "unknown"
 
 def prune_archive():
@@ -420,35 +515,18 @@ def send_pi_status(current_duty, fan_available=True, serial_connected=False):
         except Exception:
             return "unknown"
 
-    # Get uptime
-    uptime = safe(["uptime", "-p"], lambda x: x.strip().replace("up ", ""))
-    # Get CPU temperature
-    cpu_temp = safe(["vcgencmd", "measure_temp"], lambda x: (
-        lambda c: f"{c}°C / {round((float(c) * 9 / 5) + 32, 1)}°F"
-    )(x.split("=")[1].replace("'C", "")))
-    # Get disk usage
-    disk = safe(["df", "-h", "/"], lambda x: f"{x.splitlines()[1].split()[2]}/{x.splitlines()[1].split()[1]} ({x.splitlines()[1].split()[4]})")
-    # Get memory usage
-    def parse_memory(output):
-        """Parse 'free -m' output into 'used/total (percent%)' format."""
-        row = output.splitlines()[1].split()
-        total = int(row[1])
-        used = int(row[2])
-        if total == 0:
-            return "0/0 (0%)"
-        return f"{used}/{total} ({int(used / total * 100)}%)"
-    memory = safe(["free", "-m"], parse_memory)
-    # Get Wi-Fi SSID
-    #ssid = safe(["iwgetid", "-r"], lambda x: x.strip() or "not connected")
-    ssid = safe(["iwgetid", "-r"], lambda x: x.strip() or "not connected") + \
-       " (" + safe(["hostname", "-I"], lambda x: x.strip().split()[0] if x.strip() else "no IP") + ")"
-
-    # Get Wi-Fi signal strength
+    # System vitals — read straight from the kernel instead of forking
+    # uptime/free/df/vcgencmd every 30 s (see the _read_* helpers above).
+    uptime = _read_uptime()
+    cpu_temp = _fmt_cpu_temp(get_pi_temp())
+    disk = _read_disk("/")
+    memory = _read_memory()
+    cpu_load = _read_loadavg()          # 1-min load average (feeds the Pi CPU chart)
+    # SSID still needs a wireless-tools call; the IP comes from a socket (no fork).
+    ssid = safe(["iwgetid", "-r"], lambda x: x.strip() or "not connected") + f" ({_local_ip()})"
     wifi_signal = get_wifi_signal_strength()
-    # Get hostname
-    hostname = safe(["hostname"], lambda x: x.strip())
-    # Get OS version
-    os_version = safe(["lsb_release", "-d"], lambda x: x.strip().split(":")[1].strip() if ":" in x else x.strip())
+    hostname = socket.gethostname()
+    os_version = _read_os()
     # Available-updates count. Loading the apt cache costs ~90 MB, which is brutal
     # to run every 30s on a 415 MB Pi (it caused swap thrash) — and the count barely
     # changes. So refresh it once a day and reuse the cached value in between.
@@ -467,6 +545,7 @@ def send_pi_status(current_duty, fan_available=True, serial_connected=False):
         "cpu_temp": cpu_temp,
         "disk": disk,
         "memory": memory,
+        "cpu_load": cpu_load,
         "ssid": ssid,
         "wifi_signal": wifi_signal,
         "fan_speed": f"{current_duty}%" if fan_available else "N/A",

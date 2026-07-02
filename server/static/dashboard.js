@@ -83,5 +83,12 @@ function initCharts() {
         { data: flat(D.batt_times, D.FREEZE_F), borderColor: cv('--pill-red'), borderDash: [4,3], fill: false, pointRadius: 0 }
     ] }, options: chartOpts(null, null, null) });
     mk('chartConsDaily', { type: 'bar', data: { labels: D.cons_days, datasets: [{ data: D.cons_values, backgroundColor: cv('--chart-h21'), borderColor: cv('--chart-power'), borderWidth: 1 }] }, options: chartOpts(0, null, null) });
+    // Pi CPU temp (°C) + fan (%) share a 0-100 axis; both sit naturally in range.
+    mk('chartPiTemp', { type: 'line', data: { labels: D.pi_times, datasets: [
+        { data: D.pi_temp_vals, borderColor: cv('--chart-power'), fill: false, tension: 0.3, pointRadius: 0, spanGaps: true },
+        { data: D.pi_fan_vals, borderColor: cv('--chart-voltage'), fill: false, tension: 0.3, pointRadius: 0, spanGaps: true }
+    ] }, options: chartOpts(0, 100, 20) });
+    mk('chartPiMem', { type: 'line', data: { labels: D.pi_times, datasets: [{ data: D.pi_mem_vals, borderColor: cv('--chart-h20'), backgroundColor: cv('--chart-h20-fill'), fill: true, tension: 0.3, pointRadius: 0, spanGaps: true }] }, options: chartOpts(0, null, null) });
+    mk('chartPiLoad', { type: 'line', data: { labels: D.pi_times, datasets: [{ data: D.pi_load_vals, borderColor: cv('--chart-voltage'), fill: false, tension: 0.3, pointRadius: 0, spanGaps: true }] }, options: chartOpts(0, null, null) });
 }
 initCharts();

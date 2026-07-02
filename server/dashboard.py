@@ -7,6 +7,7 @@ HTML fragments, the readings table, and the Chart.js data island. Pure compute �
 no request handling, no HTML shell (that lives in templates/index.html).
 """
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from dateutil.parser import parse as parse_date
@@ -821,6 +822,30 @@ def build_context(conn, rows, days, now):
         pi_name = pi_os_val = pi_uptime = pi_cpu_temp = pi_fan_speed = None
         pi_updates_val = pi_memory = pi_disk = pi_ssid = pi_wifi_signal = None
 
+    # ---- Pi health history for the Pi charts, bounded by the 7-day pi_status
+    # retention. Values are stored as display strings, so pull the leading number
+    # from each: °C for temp, MB-used for memory, % for fan, 1-min load average
+    # (cpu_load is blank on rows posted before the Pi logger started sending it). ----
+    def _first_num(s):
+        m = re.search(r'-?\d+(?:\.\d+)?', s) if s else None
+        return float(m.group()) if m else None
+
+    pi_hist = []
+    try:
+        pi_hist = conn.execute(
+            "SELECT timestamp, cpu_temp, memory, fan_speed, cpu_load FROM pi_status "
+            "WHERE timestamp >= ? ORDER BY timestamp ASC", (since.isoformat(),)
+        ).fetchall()
+    except Exception as e:
+        server_log("GET", f"Pi history query failed: {e}", "warning")
+    stride = max(1, len(pi_hist) // 600)   # downsample (pi_status posts every ~30 s)
+    pi_sampled = pi_hist[::stride]
+    pi_times = [fmt_mt(r[0]) for r in pi_sampled]
+    pi_temp_vals = [_first_num(r[1]) for r in pi_sampled]   # °C
+    pi_mem_vals = [_first_num(r[2]) for r in pi_sampled]    # MB used
+    pi_fan_vals = [_first_num(r[3]) for r in pi_sampled]    # % duty
+    pi_load_vals = [_first_num(r[4]) for r in pi_sampled]   # 1-min load average
+
     chart_payload = {
         "timestamps": timestamps, "powers": powers, "charge_powers": charge_powers,
         "voltage_timestamps": voltage_timestamps, "voltage_values": voltage_values,
@@ -829,6 +854,8 @@ def build_context(conn, rows, days, now):
         "batt_load_values": batt_load_values, "batt_temp_values": batt_temp_values,
         "cons_days": cons_days, "cons_values": cons_values,
         "SOC_DANGER": SOC_DANGER, "FREEZE_F": FREEZE_F,
+        "pi_times": pi_times, "pi_temp_vals": pi_temp_vals, "pi_mem_vals": pi_mem_vals,
+        "pi_fan_vals": pi_fan_vals, "pi_load_vals": pi_load_vals,
     }
 
     return {
