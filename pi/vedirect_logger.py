@@ -49,6 +49,9 @@ PWM_FREQ = 25000   # 25 kHz for silent PWM
 FAN_MIN_DUTY = 20  # Minimum speed to reliably spin fan
 FAN_DUTY_DEADBAND = 10  # ignore sub-10% duty changes so the fan doesn't hunt (and
                         # flood the log) on a ~1-2°C temp wiggle mid-ramp
+FAN_HYST = 3       # °C hysteresis at the on/off threshold: once the fan is off it
+                   # stays off until temp climbs FAN_HYST above OFF_TEMP, so idling
+                   # right at OFF_TEMP doesn't toggle 0%<->min-duty
 
 # Log file paths
 LOG_PATH = "/var/log/vedirect/solar_log.jsonl"
@@ -146,6 +149,8 @@ def update_fan(pwm, temp, current_duty):
         return current_duty
     if temp <= OFF_TEMP:
         new_duty = 0  # Fan fully off
+    elif current_duty == 0 and temp < OFF_TEMP + FAN_HYST:
+        new_duty = 0  # hysteresis band: stay off until temp climbs clear of OFF_TEMP
     elif temp >= ON_TEMP:
         new_duty = 100  # Full speed
     else:
