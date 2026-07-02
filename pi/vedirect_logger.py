@@ -47,6 +47,8 @@ ON_TEMP = 50       # °C (122°F) full speed at 50°C
 OFF_TEMP = 30      # °C (77°F) fan off below 30°C
 PWM_FREQ = 25000   # 25 kHz for silent PWM
 FAN_MIN_DUTY = 20  # Minimum speed to reliably spin fan
+FAN_DUTY_DEADBAND = 10  # ignore sub-10% duty changes so the fan doesn't hunt (and
+                        # flood the log) on a ~1-2°C temp wiggle mid-ramp
 
 # Log file paths
 LOG_PATH = "/var/log/vedirect/solar_log.jsonl"
@@ -151,17 +153,19 @@ def update_fan(pwm, temp, current_duty):
         slope = (100 - FAN_MIN_DUTY) / (ON_TEMP - OFF_TEMP)
         new_duty = int(FAN_MIN_DUTY + slope * (temp - OFF_TEMP))
 
-    # Only act and log on an actual change — logging every hold flooded the log
-    # with a line every loop (the single biggest source of log growth).
-    if new_duty != current_duty:
+    # Deadband: only act when the target duty differs from the current by a
+    # meaningful amount, so a ~1-2°C temp wiggle mid-ramp doesn't make the fan
+    # hunt (and flood the log with a line every check). Terminal states (fully
+    # off / full speed) are always honored so we never stick a few percent short.
+    terminal = new_duty in (0, 100)
+    if new_duty != current_duty and (terminal or abs(new_duty - current_duty) >= FAN_DUTY_DEADBAND):
         pwm.ChangeDutyCycle(new_duty)
-
         if new_duty == 0:
             GPIO.output(FAN_PIN, GPIO.LOW)  # Ensure pin is LOW at 0%
-
         log_error(f"[Fan] Adjusted to {new_duty}% (CPU Temp: {temp}°C)")
+        return new_duty
 
-    return new_duty
+    return current_duty
 
 
 # ------------------ Serial Read ------------------ #
