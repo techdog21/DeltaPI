@@ -19,6 +19,9 @@ WorkingDirectory=__WORKDIR__
 ExecStart=__VENV_PY__ __WORKDIR__/renogy_ble.py
 Restart=on-failure
 RestartSec=15
+# Backstop: if a BLE-stack leak ever recurs, the kernel OOM-kills just this
+# service at 128 MB (baseline is ~17 MB) and systemd restarts it, sparing the Pi.
+MemoryMax=128M
 
 [Install]
 WantedBy=multi-user.target

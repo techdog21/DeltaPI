@@ -22,7 +22,7 @@ import sys
 import json
 import time
 import logging
-import threading
+import multiprocessing
 import asyncio
 import subprocess
 from datetime import datetime, timezone
@@ -79,10 +79,12 @@ def make_config(mac, alias):
     return c
 
 
-def read_battery(mac, alias):
-    """Connect, read once, return the raw parsed dict (or None on failure).
-    Runs the library's blocking client in a worker thread with its own event
-    loop, bounded by PER_BATT_TIMEOUT so a hung BLE op can't stall the service."""
+def _read_worker(mac, alias, conn):
+    """Child-process entry point: perform one BLE read and send the raw parsed
+    dict (or None) back through the pipe, then exit. Because this runs in its own
+    process, a hung BLE/BlueZ/D-Bus call can be hard-killed by the parent on
+    timeout and everything it held is reclaimed by the OS — unlike a stuck Python
+    thread, which can never be killed."""
     result = {'data': None}
 
     def on_data(client, data):
@@ -94,19 +96,52 @@ def read_battery(mac, alias):
         try: client.stop()
         except Exception: pass
 
-    def run():
-        try:
-            asyncio.set_event_loop(asyncio.new_event_loop())  # library uses get_event_loop()
-            BatteryClient(make_config(mac, alias), on_data, on_error).start()
-        except Exception as e:
-            log.warning(f"{alias}: read exception: {e!r}")
+    try:
+        asyncio.set_event_loop(asyncio.new_event_loop())  # library uses get_event_loop()
+        BatteryClient(make_config(mac, alias), on_data, on_error).start()
+    except Exception as e:
+        log.warning(f"{alias}: read exception: {e!r}")
+    try:
+        conn.send(result['data'])
+    except Exception:
+        pass
+    finally:
+        conn.close()
 
-    t = threading.Thread(target=run, daemon=True)
-    t.start()
-    t.join(PER_BATT_TIMEOUT)
-    if t.is_alive():
+
+def read_battery(mac, alias):
+    """Connect, read once, return the raw parsed dict (or None on failure).
+
+    The read runs in a short-lived child process bounded by PER_BATT_TIMEOUT. A
+    hung bleak/BlueZ call doesn't reliably cancel and a stuck thread can never be
+    killed, so the old threaded read leaked its event loop + BLE/D-Bus connection
+    forever on every timeout (a steady memory leak). A child process we can just
+    kill — the OS reclaims all of it."""
+    recv_conn, send_conn = multiprocessing.Pipe(duplex=False)
+    proc = multiprocessing.Process(target=_read_worker, args=(mac, alias, send_conn), daemon=True)
+    proc.start()
+    send_conn.close()  # parent only receives; close its copy so recv sees EOF on child exit
+
+    data = None
+    if recv_conn.poll(PER_BATT_TIMEOUT):
+        try:
+            data = recv_conn.recv()
+        except EOFError:
+            data = None                 # child exited without sending (crash/exception)
+    else:
         log.warning(f"{alias}: read timed out after {PER_BATT_TIMEOUT}s")
-    return result['data']
+    recv_conn.close()
+
+    # Reap the child; hard-kill it if the read hung so nothing is left to leak.
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(5)
+        if proc.is_alive():
+            proc.kill()
+            proc.join()
+    else:
+        proc.join()
+    return data
 
 
 def summarize(label, mac, alias, raw):
