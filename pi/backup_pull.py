@@ -26,7 +26,9 @@ Stdlib + requests only (requests is already present for the system python3 the
 logger runs under).
 """
 import glob
+import gzip
 import os
+import shutil
 import sqlite3
 import sys
 import time
@@ -40,7 +42,7 @@ BACKUP_DIR_PREF = os.environ.get("BACKUP_DIR", "/var/log/vedirect/backups")
 KEEP_COPIES = int(os.environ.get("BACKUP_KEEP", "14"))
 BACKUP_HOUR = int(os.environ.get("BACKUP_HOUR", "3"))
 
-GLOB = "vedirect-backup-*.db"
+GLOB = "vedirect-backup-*.db.gz"
 DOWNLOAD_TIMEOUT = 180          # seconds; the DB can be sizeable over a slow link
 STARTUP_SKIP_AGE = 20 * 3600   # skip the startup pull if a backup is younger than this
 
@@ -116,7 +118,7 @@ def pull_once():
     """Download one snapshot, verify it, save it, and rotate. Returns True on
     success. Never raises — failures are logged and the daily loop continues."""
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    dest = os.path.join(BACKUP_DIR, f"vedirect-backup-{ts}.db")
+    dest = os.path.join(BACKUP_DIR, f"vedirect-backup-{ts}.db.gz")
     tmp = dest + ".part"
     headers = {"Authorization": f"Bearer {POST_SECRET}"}
     try:
@@ -134,13 +136,26 @@ def pull_once():
         log(f"pull failed: {e}")
         return False
 
-    if not is_valid_sqlite(tmp):
+    # Verify: decompress to a temp .db and integrity-check it before trusting
+    # the download (guards against a truncated stream or an error page).
+    check = os.path.join(BACKUP_DIR, f".check-{ts}.db")
+    valid = False
+    try:
+        with gzip.open(tmp, "rb") as gz, open(check, "wb") as out:
+            shutil.copyfileobj(gz, out, 1024 * 1024)
+        valid = is_valid_sqlite(check)
+    except Exception as e:
+        log(f"decompress/verify failed: {e}")
+    finally:
+        _rm(check)
+
+    if not valid:
         _rm(tmp)
         log(f"integrity check failed — discarding {total} bytes, keeping prior backups")
         return False
 
     os.replace(tmp, dest)
-    log(f"saved {dest} ({total} bytes)")
+    log(f"saved {dest} ({total} bytes compressed)")
     rotate()
     return True
 

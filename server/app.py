@@ -22,9 +22,11 @@ that buffers locally and bulk-uploads periodically.
 
 Author: DeltaPI Project - Jerry Craft
 """
+import gzip
 import hmac
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -248,32 +250,45 @@ def backup_db():
         return jsonify({"error": "Unauthorized"}), 403
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    # Snapshot into a temp file on the same (persistent) disk as the DB.
+    # Snapshot into a temp file on the same (persistent) disk as the DB, then
+    # gzip it. Solar JSON compresses several-fold, so the download (and the Pi's
+    # storage) is a fraction of the raw multi-hundred-MB database — which also
+    # makes the transfer reliable instead of timing out mid-stream.
     fd, tmp_path = tempfile.mkstemp(prefix="backup-", suffix=".db", dir=DB_DIR)
     os.close(fd)
+    gz_path = tmp_path + ".gz"
     try:
         dest = sqlite3.connect(tmp_path)
         try:
             get_db().backup(dest)  # online, consistent page-by-page copy
         finally:
             dest.close()
+        with open(tmp_path, "rb") as raw, gzip.open(gz_path, "wb", compresslevel=6) as gz:
+            shutil.copyfileobj(raw, gz, 1024 * 1024)
     except Exception as e:
+        for p in (tmp_path, gz_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        server_log("GET", f"Backup snapshot failed for {client_ip}: {e}", "error")
+        return jsonify({"error": "Backup failed"}), 500
+    finally:
+        # The uncompressed copy is only needed to build the gzip; drop it now.
         try:
             os.remove(tmp_path)
         except OSError:
             pass
-        server_log("GET", f"Backup snapshot failed for {client_ip}: {e}", "error")
-        return jsonify({"error": "Backup failed"}), 500
 
-    resp = send_file(tmp_path, as_attachment=True,
-                     download_name=f"vedirect-backup-{ts}.db",
-                     mimetype="application/octet-stream")
+    resp = send_file(gz_path, as_attachment=True,
+                     download_name=f"vedirect-backup-{ts}.db.gz",
+                     mimetype="application/gzip")
 
     @resp.call_on_close
     def _cleanup():
         # Runs after the response has finished streaming to the client.
         try:
-            os.remove(tmp_path)
+            os.remove(gz_path)
         except OSError:
             pass
 
