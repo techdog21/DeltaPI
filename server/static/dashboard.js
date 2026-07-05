@@ -90,5 +90,7 @@ function initCharts() {
     ] }, options: chartOpts(0, 100, 20) });
     mk('chartPiMem', { type: 'line', data: { labels: D.pi_times, datasets: [{ data: D.pi_mem_vals, borderColor: cv('--chart-h20'), backgroundColor: cv('--chart-h20-fill'), fill: true, tension: 0.3, pointRadius: 0, spanGaps: true }] }, options: chartOpts(0, null, null) });
     mk('chartPiLoad', { type: 'line', data: { labels: D.pi_times, datasets: [{ data: D.pi_load_vals, borderColor: cv('--chart-voltage'), fill: false, tension: 0.3, pointRadius: 0, spanGaps: true }] }, options: chartOpts(0, null, null) });
+    // Pi disk (GB used) — anchored at 0 so the line height tracks actual fill; watch it creep up.
+    mk('chartPiDisk', { type: 'line', data: { labels: D.pi_times, datasets: [{ data: D.pi_disk_vals, borderColor: cv('--chart-h21-border'), fill: false, tension: 0.3, pointRadius: 0, spanGaps: true }] }, options: chartOpts(0, null, null) });
 }
 initCharts();

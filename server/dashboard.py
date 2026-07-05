@@ -833,7 +833,7 @@ def build_context(conn, rows, days, now):
     pi_hist = []
     try:
         pi_hist = conn.execute(
-            "SELECT timestamp, cpu_temp, memory, fan_speed, cpu_load FROM pi_status "
+            "SELECT timestamp, cpu_temp, memory, fan_speed, cpu_load, disk FROM pi_status "
             "WHERE timestamp >= ? ORDER BY timestamp ASC", (since.isoformat(),)
         ).fetchall()
     except Exception as e:
@@ -845,6 +845,7 @@ def build_context(conn, rows, days, now):
     pi_mem_vals = [_first_num(r[2]) for r in pi_sampled]    # MB used
     pi_fan_vals = [_first_num(r[3]) for r in pi_sampled]    # % duty
     pi_load_vals = [_first_num(r[4]) for r in pi_sampled]   # 1-min load average
+    pi_disk_vals = [_first_num(r[5]) for r in pi_sampled]   # GB used (leading number of "12.3G/32G (39%)")
 
     chart_payload = {
         "timestamps": timestamps, "powers": powers, "charge_powers": charge_powers,
@@ -855,7 +856,7 @@ def build_context(conn, rows, days, now):
         "cons_days": cons_days, "cons_values": cons_values,
         "SOC_DANGER": SOC_DANGER, "FREEZE_F": FREEZE_F,
         "pi_times": pi_times, "pi_temp_vals": pi_temp_vals, "pi_mem_vals": pi_mem_vals,
-        "pi_fan_vals": pi_fan_vals, "pi_load_vals": pi_load_vals,
+        "pi_fan_vals": pi_fan_vals, "pi_load_vals": pi_load_vals, "pi_disk_vals": pi_disk_vals,
     }
 
     return {
