@@ -47,14 +47,16 @@ def init_db():
                 pi_os TEXT DEFAULT 'unknown',
                 pi_updates TEXT DEFAULT 'unknown',
                 controller TEXT DEFAULT 'unknown',
-                cpu_load TEXT DEFAULT 'unknown'
+                cpu_load TEXT DEFAULT 'unknown',
+                backup_count TEXT DEFAULT 'unknown',
+                backup_latest TEXT DEFAULT 'unknown'
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pi_status_timestamp ON pi_status (timestamp)")
         # Migrate: add any missing optional columns to pi_status
         cols = {row[1] for row in conn.execute("PRAGMA table_info(pi_status)").fetchall()}
-        for col in ("pi_name", "pi_os", "pi_updates", "controller", "cpu_load"):
+        for col in ("pi_name", "pi_os", "pi_updates", "controller", "cpu_load", "backup_count", "backup_latest"):
             if col not in cols:
                 conn.execute(f"ALTER TABLE pi_status ADD COLUMN {col} TEXT DEFAULT 'unknown'")
 

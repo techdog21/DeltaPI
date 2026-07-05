@@ -53,11 +53,11 @@ def build_context(conn, rows, days, now):
     pi_status_row = None
     try:
         row = conn.execute(
-            "SELECT ip, timestamp, uptime, cpu_temp, disk, memory, ssid, wifi_signal, fan_speed, pi_name, pi_os, pi_updates, controller FROM pi_status ORDER BY timestamp DESC LIMIT 1"
+            "SELECT ip, timestamp, uptime, cpu_temp, disk, memory, ssid, wifi_signal, fan_speed, pi_name, pi_os, pi_updates, controller, backup_count, backup_latest FROM pi_status ORDER BY timestamp DESC LIMIT 1"
         ).fetchone()
         if row:
             pi_status_row = dict(zip(
-                ["ip", "timestamp", "uptime", "cpu_temp", "disk", "memory", "ssid", "wifi_signal", "fan_speed", "pi_name", "pi_os", "pi_updates", "controller"], row
+                ["ip", "timestamp", "uptime", "cpu_temp", "disk", "memory", "ssid", "wifi_signal", "fan_speed", "pi_name", "pi_os", "pi_updates", "controller", "backup_count", "backup_latest"], row
             ))
     except Exception as e:
         server_log("GET", f"Failed to fetch Pi status: {e}", "warning")
@@ -822,6 +822,20 @@ def build_context(conn, rows, days, now):
         pi_name = pi_os_val = pi_uptime = pi_cpu_temp = pi_fan_speed = None
         pi_updates_val = pi_memory = pi_disk = pi_ssid = pi_wifi_signal = None
 
+    # Backup health: the puller runs daily, so a latest backup < ~26 h old is
+    # healthy; older (or none) flips the pill so a silently-stopped puller shows.
+    _bc = pi_status_row.get("backup_count") if pi_status_row else None
+    backup_count_disp = _bc if (_bc and _bc != "unknown") else "—"
+    _bl = pi_status_row.get("backup_latest") if pi_status_row else None
+    try:
+        _bage = (datetime.now(timezone.utc) - ensure_utc(datetime.fromisoformat(_bl))).total_seconds() / 60
+        backup_age_label = f"{humanize_minutes(_bage)} ago"
+        backup_class, backup_pill_label = make_status_pill(_bage, [
+            (26 * 60, ("green", "fresh")), (50 * 60, ("yellow", "late")), (float('inf'), ("red", "stale"))
+        ])
+    except Exception:
+        backup_age_label, backup_class, backup_pill_label = "never", "gray", "none"
+
     # ---- Pi health history for the Pi charts, bounded by the 7-day pi_status
     # retention. Values are stored as display strings, so pull the leading number
     # from each: °C for temp, MB-used for memory, % for fan, 1-min load average
@@ -893,6 +907,8 @@ def build_context(conn, rows, days, now):
         "pi_name": pi_name, "pi_os_val": pi_os_val, "pi_uptime": pi_uptime,
         "pi_cpu_temp": pi_cpu_temp, "pi_fan_speed": pi_fan_speed, "pi_updates_val": pi_updates_val,
         "pi_memory": pi_memory, "pi_disk": pi_disk, "pi_ssid": pi_ssid, "pi_wifi_signal": pi_wifi_signal,
+        "backup_count_disp": backup_count_disp, "backup_age_label": backup_age_label,
+        "backup_class": backup_class, "backup_pill_label": backup_pill_label,
         "controller_class": controller_class, "controller_label": controller_label,
         "checkin_class": checkin_class, "checkin_label": checkin_label,
         "temp_class": temp_class, "temp_label": temp_label,

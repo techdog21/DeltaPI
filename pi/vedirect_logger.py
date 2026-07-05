@@ -38,6 +38,8 @@ import time
 import requests
 import subprocess
 import socket
+import glob
+import re
 from datetime import datetime, timedelta, timezone
 import RPi.GPIO as GPIO
 
@@ -287,6 +289,30 @@ def _read_disk(path="/"):
         return f"{used / gib:.1f}G/{total / gib:.0f}G ({pct}%)"
     except Exception:
         return "unknown"
+
+
+def _read_backups(backup_dir=None):
+    """(count, latest_iso) for the off-box DB backups the puller keeps under
+    BACKUP_DIR. latest_iso is the newest backup's snapshot time parsed from its
+    filename (falling back to mtime); (0, 'unknown') when none exist yet."""
+    d = backup_dir or os.environ.get("BACKUP_DIR", "/var/log/vedirect/backups")
+    try:
+        files = glob.glob(os.path.join(d, "vedirect-backup-*.db.gz"))
+    except Exception:
+        return 0, "unknown"
+    if not files:
+        return 0, "unknown"
+    newest = max(files, key=os.path.getmtime)
+    m = re.search(r"vedirect-backup-(\d{8}T\d{6}Z)\.db\.gz$", os.path.basename(newest))
+    try:
+        if m:
+            dt = datetime.strptime(m.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        else:
+            dt = datetime.fromtimestamp(os.path.getmtime(newest), timezone.utc)
+        latest = dt.isoformat()
+    except Exception:
+        latest = "unknown"
+    return len(files), latest
 
 
 def _read_os():
@@ -543,6 +569,7 @@ def send_pi_status(current_duty, fan_available=True, serial_connected=False):
         )
         _last_updates_check = time.time()
     updates = _updates_cached
+    backup_count, backup_latest = _read_backups()
 
     # Prepare payload for status POST
     payload = {
@@ -557,7 +584,9 @@ def send_pi_status(current_duty, fan_available=True, serial_connected=False):
         "pi_name": hostname,
         "pi_os": os_version,
         "pi_updates": updates,
-        "controller": "Connected" if serial_connected else "No controller detected"
+        "controller": "Connected" if serial_connected else "No controller detected",
+        "backup_count": str(backup_count),
+        "backup_latest": backup_latest,
     }
 
     try:

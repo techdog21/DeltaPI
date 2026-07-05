@@ -111,6 +111,7 @@
         <div class="metric"><span class="metric-label">CPU / Fan</span><span class="metric-value">{{ pi_cpu_temp }} <span class="pill {{ temp_class }}">{{ temp_label }}</span> {{ pi_fan_speed }} <span class="pill {{ fan_class }}">{{ fan_label }}</span></span></div>
         <div class="metric"><span class="metric-label">Updates</span><span class="metric-value">{{ pi_updates_val }} <span class="pill {{ updates_class }}">{{ updates_label }}</span></span></div>
         <div class="metric"><span class="metric-label">Mem / Disk</span><span class="metric-value">{{ pi_memory }} / {{ pi_disk }}</span></div>
+        <div class="metric"><span class="metric-label">Backups</span><span class="metric-value">{{ backup_count_disp }} · {{ backup_age_label }} <span class="pill {{ backup_class }}">{{ backup_pill_label }}</span></span></div>
         <div class="metric"><span class="metric-label">Wi-Fi</span><span class="metric-value">{{ pi_ssid }} {{ pi_wifi_signal }} <span class="pill {{ wifi_class }}">{{ wifi_label }}</span></span></div>
         <div class="metric"><span class="metric-label">Data storage</span><span class="metric-value">{{ data_percent }}% used <span class="pill {{ data_class }}">{{ data_label }}</span> · {{ existing_days }} of 365 d</span></div>
         {% else %}
