@@ -1,0 +1,29 @@
+# DeltaPI database backup puller — systemd unit template.
+# Pulls a consistent SQLite snapshot from the server's authenticated /backup
+# endpoint once a day and keeps rotating copies off-box, so the Pi is an
+# off-site backup of the Render database (otherwise a single copy on one disk).
+# See pi/backup_pull.py for the schedule and retention behavior.
+#
+# The __TOKENS__ below are filled in at install time by pi/deploy.py, which
+# detects the invoking user and repo paths — do not edit them by hand. Install:
+#   sudo python3 pi/deploy.py            # everything
+#   sudo python3 pi/deploy.py backup_pull  # just this service
+#
+# Reuses the same __ENVFILE__ secrets (POST_SECRET / BASE_URL) as the logger;
+# optional BACKUP_DIR / BACKUP_KEEP / BACKUP_HOUR may be set there too.
+[Unit]
+Description=DeltaPI Database Backup Puller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__WORKDIR__
+EnvironmentFile=__ENVFILE__
+ExecStart=__LOGGER_PY__ __WORKDIR__/backup_pull.py
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

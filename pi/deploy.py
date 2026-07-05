@@ -42,6 +42,7 @@ SERVICES = {
     "vedirect_logger": "vedirect_logger.service",
     "renogy_ble": "renogy_ble.service",
     "starlink_poll": "starlink_poll.service",
+    "backup_pull": "backup_pull.service",
 }
 ALL_TARGETS = list(SERVICES) + ["logrotate"]
 

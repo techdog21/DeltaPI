@@ -4,12 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DeltaPi Camping Monitor</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="apple-touch-icon" href="/static/icon.png">
     <link rel="icon" type="image/png" href="/static/icon.png">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-title" content="DeltaPi">
     <meta name="theme-color" content="#0a0a0a">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
     <script>
@@ -202,6 +204,6 @@
     <script id="dash-data" type="application/json">{{ chart_payload | tojson }}</script>
 </div>
 
-<script src="/static/dashboard.js"></script>
+<script defer src="/static/dashboard.js"></script>
 </body>
 </html>
