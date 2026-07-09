@@ -303,9 +303,47 @@ def backup_db():
 # timer, a short TTL is invisible to users but turns repeat loads into instant cache
 # hits. Keyed by `days` (theme is applied client-side, so cached HTML is theme-neutral).
 # The lock also collapses a cold-start stampede (several tabs at once) into one render.
-_PAGE_CACHE_TTL = 45  # seconds
-_page_cache = {}      # days -> (epoch, rendered_html)
+#
+# Stale-while-revalidate: a cache entry that has expired but is younger than
+# _PAGE_CACHE_MAX_STALE is served instantly while one background thread re-renders
+# it, so a returning visitor never waits on a render. Older than that (nobody has
+# looked in a while) the data on the page would be visibly out of date, so those
+# render synchronously.
+_PAGE_CACHE_TTL = 45           # seconds a render is served as-is
+_PAGE_CACHE_MAX_STALE = 600    # expired entries younger than this serve stale + refresh
+_page_cache = {}               # days -> (epoch, rendered_html)
 _page_cache_lock = threading.Lock()
+_page_refreshing = set()       # days values with a background re-render in flight
+
+
+def _render_page(days):
+    """Query the `days` window and render the dashboard HTML (no caching).
+    Needs an app context (for the per-context DB connection and the template)."""
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=days)
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT timestamp, received, data FROM logs WHERE timestamp >= ? ORDER BY timestamp DESC",
+        (since.isoformat(),)
+    ).fetchall()
+    ctx = build_context(conn, rows, days, now)
+    return render_template("index.html", **ctx)
+
+
+def _refresh_page_async(days):
+    """Re-render `days` in a daemon thread and swap the result into the cache.
+    Caller must have already registered `days` in _page_refreshing."""
+    def work():
+        try:
+            with app.app_context():   # own DB connection; closed by teardown
+                html = _render_page(days)
+            _page_cache[days] = (time.time(), html)
+        except Exception as e:
+            server_log("GET", f"Background re-render failed for days={days}: {e}", "error")
+        finally:
+            with _page_cache_lock:
+                _page_refreshing.discard(days)
+    threading.Thread(target=work, daemon=True).start()
 
 
 @app.route("/", methods=["GET", "HEAD"])
@@ -314,7 +352,8 @@ def index():
     Main dashboard route. Decrypts optional token to determine date range (default 7 days),
     queries solar data, delegates metric computation to dashboard.build_context, and renders
     templates/index.html. The rendered HTML is cached per date range for _PAGE_CACHE_TTL
-    seconds. Supports light/dark theme toggle via cookie persistence (applied client-side).
+    seconds (recently-expired entries serve stale while a background thread re-renders).
+    Supports light/dark theme toggle via cookie persistence (applied client-side).
     """
     if request.method == "HEAD":
         return "", 200
@@ -327,8 +366,17 @@ def index():
 
     # Fast path: serve a fresh cached render without contending for the lock.
     cached = _page_cache.get(days)
-    if cached and time.time() - cached[0] < _PAGE_CACHE_TTL:
-        return cached[1]
+    if cached:
+        age = time.time() - cached[0]
+        if age < _PAGE_CACHE_TTL:
+            return cached[1]
+        if age < _PAGE_CACHE_MAX_STALE:
+            # Serve the stale page now; kick off (at most) one background refresh.
+            with _page_cache_lock:
+                if days not in _page_refreshing:
+                    _page_refreshing.add(days)
+                    _refresh_page_async(days)
+            return cached[1]
 
     with _page_cache_lock:
         # Re-check: another request may have rendered while we waited on the lock.
@@ -336,20 +384,11 @@ def index():
         if cached and time.time() - cached[0] < _PAGE_CACHE_TTL:
             return cached[1]
 
-        now = datetime.now(timezone.utc)
         try:
-            since = now - timedelta(days=days)
-            conn = get_db()
-            rows = conn.execute(
-                "SELECT timestamp, received, data FROM logs WHERE timestamp >= ? ORDER BY timestamp DESC",
-                (since.isoformat(),)
-            ).fetchall()
+            html = _render_page(days)
         except Exception as db_err:
-            server_log("GET", f"Database query failed: {db_err}", "error")
-            return f"<p>Error reading database: {db_err}</p>"
-
-        ctx = build_context(conn, rows, days, now)
-        html = render_template("index.html", **ctx)
+            server_log("GET", f"Dashboard render failed: {db_err}", "error")
+            return f"<p>Error rendering dashboard: {db_err}</p>"
         _page_cache[days] = (time.time(), html)
         return html
 

@@ -8,6 +8,7 @@ no request handling, no HTML shell (that lives in templates/index.html).
 """
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from dateutil.parser import parse as parse_date
@@ -23,6 +24,23 @@ from energy import (estimate_soc, soc_pill, sustainability_outlook,
 from integrations import (get_weather, get_air_quality, get_nws_alerts, get_place,
                           get_wildfires, get_quake, get_aurora, get_river)
 from db import get_disk_status
+
+# One point per chart pixel is plenty: at one frame per ~15 s a 7-day window is
+# ~40k rows, and shipping them all makes the chart data island multi-MB and the
+# client-side Chart.js render crawl.
+CHART_MAX_POINTS = 600
+
+
+def _downsample(rows, max_points=CHART_MAX_POINTS):
+    """Stride-sample a chronological list down to ~max_points for the charts,
+    always keeping the newest point so the right edge stays current."""
+    stride = max(1, len(rows) // max_points)
+    if stride == 1:
+        return rows
+    sampled = rows[::stride]
+    if sampled[-1] is not rows[-1]:
+        sampled.append(rows[-1])
+    return sampled
 
 
 def build_context(conn, rows, days, now):
@@ -64,9 +82,14 @@ def build_context(conn, rows, days, now):
 
     # Parse logs
     batt_series = []  # (ts, soc%, house_load_w) for frames carrying measured battery data
+    sl_history = []   # (row_ts, up?) per frame carrying Starlink data, newest-first —
+                      # captured here so the streak walk below needn't re-parse every row
     for row in rows:
         try:
             data = json.loads(row["data"])
+            sl_frame = data.get("starlink")
+            if sl_frame:
+                sl_history.append((row["timestamp"], _sl_up(sl_frame)))
             ts = data.get("timestamp", row["timestamp"])
             ts_dt = ensure_utc(datetime.fromisoformat(ts))
             if ts_dt < since:
@@ -135,19 +158,22 @@ def build_context(conn, rows, days, now):
     h20_days = sorted(daily_h20.keys())
     h20_values = [round(daily_h20[day], 2) for day in h20_days]
 
-    # Voltage / power charts
-    voltage_timestamps, voltage_values = build_voltage_series(parsed_chrono)
-    timestamps = [fmt_mt(p[0]) for p in reversed(parsed)]
-    powers = [p[3] for p in reversed(parsed)]                          # PPV (panel input)
-    charge_powers = [round(p[1] * p[2], 1) for p in reversed(parsed)]  # MPPT output to battery (V*I)
-    today_yield = parsed[0][8] if parsed else 0                        # H20, kWh produced today
+    # Voltage / power charts — downsampled to ~CHART_MAX_POINTS. Aggregates
+    # (daily kWh, daily consumption) still integrate over the full data.
+    chart_rows = _downsample(parsed_chrono)
+    voltage_timestamps, voltage_values = build_voltage_series(chart_rows)
+    timestamps = [fmt_mt(p[0]) for p in chart_rows]
+    powers = [p[3] for p in chart_rows]                          # PPV (panel input)
+    charge_powers = [round(p[1] * p[2], 1) for p in chart_rows]  # MPPT output to battery (V*I)
+    today_yield = parsed[0][8] if parsed else 0                  # H20, kWh produced today
 
     # Battery charts (measured) — chronological; only frames carrying battery data.
     batt_chrono = list(reversed(batt_series))
-    batt_times = [fmt_mt(b[0]) for b in batt_chrono]
-    batt_soc_values = [b[1] for b in batt_chrono]
-    batt_load_values = [b[2] for b in batt_chrono]
-    batt_temp_values = [b[3] for b in batt_chrono]
+    batt_sampled = _downsample(batt_chrono)
+    batt_times = [fmt_mt(b[0]) for b in batt_sampled]
+    batt_soc_values = [b[1] for b in batt_sampled]
+    batt_load_values = [b[2] for b in batt_sampled]
+    batt_temp_values = [b[3] for b in batt_sampled]
     SOC_DANGER = 20  # red floor line: regularly draining below this shortens LiFePO4 life
     FREEZE_F = 32    # red line on the temp chart: LiFePO4 must not charge below freezing
     # Daily-energy chart: scale to the data instead of a fixed 1.6 ceiling
@@ -445,20 +471,14 @@ def build_context(conn, rows, days, now):
     else:
         sl_status_class, sl_status_label = "yellow", str(starlink.get("state") or "?").title()
 
-    # How long Starlink has held its current up/down state: walk frame history
-    # (rows are newest-first) until the connected/not-connected state flips.
+    # How long Starlink has held its current up/down state: walk the per-frame
+    # up/down flags captured in the parse loop (newest-first) until the state flips.
     sl_streak_html = ""
     if starlink:
         cur_up = _sl_up(starlink)
         streak_start, hit_edge = None, True
-        for r_ts, _r_recv, r_data in rows:
-            try:
-                sl = json.loads(r_data).get("starlink")
-            except Exception:
-                continue
-            if not sl:
-                continue
-            if _sl_up(sl) == cur_up:
+        for r_ts, r_up in sl_history:
+            if r_up == cur_up:
                 streak_start = r_ts          # extend the streak back to this frame
             else:
                 hit_edge = False             # found the transition
@@ -515,7 +535,21 @@ def build_context(conn, rows, days, now):
         wx_lat = wx_lon = None                           # positively roaming on a no-GPS dish
     else:
         wx_lat, wx_lon = HOME_LAT, HOME_LON              # home / can't tell -> home coords
-    wx = get_weather(wx_lat, wx_lon)
+
+    # All eight external lookups are independent (lat, lon) fetches with their own
+    # caches and timeouts, so run them concurrently: a cold render costs roughly
+    # the single slowest call instead of the serial sum, and one hung upstream
+    # costs its timeout rather than stalling the whole chain. Each provider
+    # swallows its own failures (returns None/cached), so result() never raises.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ext = {name: pool.submit(fn, wx_lat, wx_lon) for name, fn in (
+            ("weather", get_weather), ("place", get_place), ("alerts", get_nws_alerts),
+            ("fires", get_wildfires), ("aqi", get_air_quality), ("quake", get_quake),
+            ("river", get_river), ("aurora", get_aurora),
+        )}
+        ext = {name: f.result() for name, f in ext.items()}
+
+    wx = ext["weather"]
     forecast_tier = "unknown"   # solar forecast tier, feeds the Sustainability Outlook
     if wx:
         cur = wx.get("current") or {}
@@ -587,7 +621,7 @@ def build_context(conn, rows, days, now):
         weather_html = '<div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill gray">No location</span></span></div>'
 
     # Location (reverse-geocoded dish GPS) as the Weather panel's first metric.
-    place = get_place(wx_lat, wx_lon)
+    place = ext["place"]
     if place:
         loc_val = escape(place)
     elif wx_lat is not None:
@@ -602,7 +636,7 @@ def build_context(conn, rows, days, now):
     # and today's solar window (from the forecast's sunrise/sunset).
     environment_html = ""
 
-    alerts = get_nws_alerts(wx_lat, wx_lon)
+    alerts = ext["alerts"]
     if alerts is None:
         environment_html += '<div class="metric"><span class="metric-label">Alert</span><span class="metric-value"><span class="pill gray">—</span></span></div>'
     elif not alerts:
@@ -614,7 +648,7 @@ def build_context(conn, rows, days, now):
         environment_html += f'<div class="metric"><span class="metric-label">Alert</span><span class="metric-value"><span class="pill {a_cls}">{escape((top.get("event") or "Alert") + extra)}</span></span></div>'
 
     # Wildfire proximity (NASA FIRMS) — actual fire detections, vs the AQI/PM2.5 smoke proxy.
-    fires = get_wildfires(wx_lat, wx_lon)
+    fires = ext["fires"]
     if fires is None:
         environment_html += '<div class="metric"><span class="metric-label">Wildfire</span><span class="metric-value"><span class="pill gray">—</span></span></div>'
     elif not fires:
@@ -625,7 +659,7 @@ def build_context(conn, rows, days, now):
         more = f" · {cnt} within 60 mi" if cnt > 1 else ""
         environment_html += f'<div class="metric"><span class="metric-label">Wildfire</span><span class="metric-value">{nm:.0f} mi {brg}{more} <span class="pill {f_cls}">{f_lbl}</span></span></div>'
 
-    aq = (get_air_quality(wx_lat, wx_lon) or {}).get("current") or {}
+    aq = (ext["aqi"] or {}).get("current") or {}
     aqi, pm = aq.get("us_aqi"), aq.get("pm2_5")
     if aqi is None:
         environment_html += '<div class="metric"><span class="metric-label">Air quality</span><span class="metric-value"><span class="pill gray">—</span></span></div>'
@@ -635,7 +669,7 @@ def build_context(conn, rows, days, now):
         environment_html += f'<div class="metric"><span class="metric-label">Air quality</span><span class="metric-value">AQI {aqi:.0f}{pm_str} <span class="pill {aq_cls}">{aq_lbl}</span></span></div>'
 
     # Recent earthquake nearby (USGS) — most significant within ~250 mi over 24 h.
-    quake = get_quake(wx_lat, wx_lon)
+    quake = ext["quake"]
     if quake is None:
         environment_html += '<div class="metric"><span class="metric-label">Earthquake</span><span class="metric-value"><span class="pill gray">—</span></span></div>'
     elif not quake:
@@ -653,7 +687,7 @@ def build_context(conn, rows, days, now):
 
     # Nearest river gauge + NWS flood status (USGS gage height + NOAA NWPS).
     # Omitted when no gauge is nearby (common away from rivers).
-    river = get_river(wx_lat, wx_lon)
+    river = ext["river"]
     if river:
         rname = (river.get("name") or "River").split(",")[0]
         if len(rname) > 32:
@@ -709,7 +743,7 @@ def build_context(conn, rows, days, now):
     environment_html += f'<div class="metric"><span class="metric-label">Moon</span><span class="metric-value">{mp_name} · {mp_illum}%</span></div>'
 
     # Aurora — overhead probability + planetary Kp (NOAA SWPC). Green = likely visible.
-    aurora = get_aurora(wx_lat, wx_lon)
+    aurora = ext["aurora"]
     if aurora and (aurora.get("prob") is not None or aurora.get("kp") is not None):
         prob, kp = aurora.get("prob"), aurora.get("kp")
         parts = []
