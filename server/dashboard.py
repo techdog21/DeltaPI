@@ -651,6 +651,19 @@ def build_context(conn, rows, days, now):
     pi_load_vals = [_first_num(r[4]) for r in pi_sampled]   # 1-min load average
     pi_disk_vals = [_first_num(r[5]) for r in pi_sampled]   # GB used (leading number of "12.3G/32G (39%)")
 
+    # Y-axis ceilings so usage reads against the machine's actual capacity:
+    # memory/disk totals parsed from the latest status strings ("used/total (pct%)"
+    # and "usedG/totalG (pct%)"); CPU load tops out at 4 (every recent Pi is
+    # quad-core, so 4.0 = all cores busy), stretched if load ever exceeds it.
+    # None (unparseable / no Pi data) lets Chart.js fall back to auto-scaling.
+    def _total_of(s):
+        m = re.search(r'/\s*(\d+(?:\.\d+)?)', s) if s else None
+        return float(m.group(1)) if m else None
+
+    pi_mem_max = _total_of(pi_status_row.get("memory")) if pi_status_row else None
+    pi_disk_max = _total_of(pi_status_row.get("disk")) if pi_status_row else None
+    pi_load_max = max([4.0] + [v for v in pi_load_vals if v is not None])
+
     chart_payload = {
         "timestamps": timestamps, "powers": powers, "charge_powers": charge_powers,
         "voltage_timestamps": voltage_timestamps, "voltage_values": voltage_values,
@@ -661,6 +674,7 @@ def build_context(conn, rows, days, now):
         "SOC_DANGER": SOC_DANGER, "FREEZE_F": FREEZE_F,
         "pi_times": pi_times, "pi_temp_vals": pi_temp_vals, "pi_mem_vals": pi_mem_vals,
         "pi_fan_vals": pi_fan_vals, "pi_load_vals": pi_load_vals, "pi_disk_vals": pi_disk_vals,
+        "pi_mem_max": pi_mem_max, "pi_disk_max": pi_disk_max, "pi_load_max": pi_load_max,
     }
 
     return {
@@ -1010,7 +1024,8 @@ def placeholder_context(days):
         "cons_days", "cons_values", "pi_times", "pi_temp_vals", "pi_mem_vals",
         "pi_fan_vals", "pi_load_vals", "pi_disk_vals",
     )}
-    empty_charts.update({"h20_ymax": 1.6, "SOC_DANGER": 20, "FREEZE_F": 32})
+    empty_charts.update({"h20_ymax": 1.6, "SOC_DANGER": 20, "FREEZE_F": 32,
+                         "pi_mem_max": None, "pi_disk_max": None, "pi_load_max": None})
     return {
         "days": days, "MAX_DAYS": MAX_DAYS, "booting": True,
         # battery panel
