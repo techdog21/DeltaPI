@@ -46,7 +46,7 @@
     <div class="panel">
         <h2>Weather</h2>
         <div id="weatherBody">
-            <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill gray">Loading…</span></span></div>
+            <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill red">Loading…</span></span></div>
         </div>
     </div>
 
@@ -54,7 +54,7 @@
     <div class="panel">
         <h2>Environment</h2>
         <div id="envBody">
-            <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill gray">Loading…</span></span></div>
+            <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill red">Loading…</span></span></div>
         </div>
     </div>
 
@@ -74,7 +74,7 @@
         <div class="metric"><span class="metric-label">Data storage</span><span class="metric-value">{{ data_percent }}% used <span class="pill {{ data_class }}">{{ data_label }}</span> · {{ existing_days }} of 365 d</span></div>
         {% elif booting %}
         <h2>Pi Health</h2>
-        <p style="color:#666; font-size:12px;">Loading…</p>
+        <p style="font-size:12px;"><span class="pill red">Loading…</span></p>
         {% else %}
         <h2>Pi Health</h2>
         <p style="color:#666; font-size:12px;">No Pi status data available.</p>

@@ -1000,8 +1000,9 @@ def build_external(inp):
 def placeholder_context(days):
     """Context for the instant page shell: every metric renders as a neutral
     loading placeholder with no DB or API work at all. dashboard.js then fills
-    the page from /panels (local data) and /external (third-party lookups)."""
-    pc, pl = "gray", "…"    # placeholder pill class / label
+    the page from /panels (local data) and /external (third-party lookups).
+    Red pills so what's still loading catches the eye until real data lands."""
+    pc, pl = "red", "…"     # placeholder pill class / label
     empty_charts = {k: [] for k in (
         "timestamps", "powers", "charge_powers", "voltage_timestamps",
         "voltage_values", "h20_days", "h20_values", "batt_times",
