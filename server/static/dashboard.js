@@ -17,19 +17,59 @@ function toggleTheme() {
     location.reload();
 }
 
-// Live in-place refresh: fetch the page, swap only the .dashboard contents (the
-// header/controls live outside it, so the dropdown/scroll are untouched), then
-// rebuild the charts from the fresh data island. No full reload -> no flash.
-function refreshDashboard() {
-    fetch(window.location.pathname + window.location.search, { cache: 'no-store' })
-        .then(function(r) { return r.text(); })
-        .then(function(html) {
-            var doc = new DOMParser().parseFromString(html, 'text/html');
-            var fresh = doc.querySelector('.dashboard');
-            var cur = document.querySelector('.dashboard');
-            if (fresh && cur) { cur.innerHTML = fresh.innerHTML; initCharts(); }
-        })
+// ---- Progressive load ----
+// The server returns an instant shell full of placeholders; the real content
+// arrives in two stages fetched here: /panels (everything from the local DB —
+// fast) is swapped into .dashboard wholesale, then /external (the eight
+// third-party weather/environment APIs — slow) fills its slots by id. A slow
+// upstream API can therefore only ever delay the Weather/Environment bodies,
+// never the page or the local data.
+
+var _lastExternal = null;   // last /external payload, re-applied after a panels swap
+
+function applyExternal(d) {
+    if (!d || d.error) return;
+    var wb = document.getElementById('weatherBody');
+    var eb = document.getElementById('envBody');
+    var fc = document.getElementById('solarFc');
+    var op = document.getElementById('outlookPill');
+    if (wb) wb.innerHTML = d.weather_html;
+    if (eb) eb.innerHTML = d.environment_html;
+    if (fc) fc.innerHTML = d.solar_fc_html;
+    if (op) { op.className = 'pill ' + d.outlook_class; op.textContent = d.outlook_label; }
+}
+
+function loadExternal() {
+    fetch('/external' + window.location.search, { cache: 'no-store' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) { _lastExternal = d; applyExternal(d); })
         .catch(function() {});
+}
+
+var _panelsRetry = null;
+function loadPanels() {
+    if (_panelsRetry) { clearTimeout(_panelsRetry); _panelsRetry = null; }
+    fetch('/panels' + window.location.search, { cache: 'no-store' })
+        .then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.text();
+        })
+        .then(function(html) {
+            var cur = document.querySelector('.dashboard');
+            if (cur) {
+                cur.innerHTML = html;
+                initCharts();
+                applyExternal(_lastExternal);   // keep the last weather while a fresh one loads
+            }
+            loadExternal();
+        })
+        .catch(function() { _panelsRetry = setTimeout(loadPanels, 10000); });
+}
+
+// In-place refresh (auto-refresh timer): same two-stage fetch — no full reload,
+// so the header controls and scroll position are untouched and nothing flashes.
+function refreshDashboard() {
+    loadPanels();
 }
 
 var _refreshTimer = null;
@@ -48,7 +88,7 @@ function setAutoRefresh(seconds) {
     if (parseInt(saved) > 0) setAutoRefresh(parseInt(saved));
 })();
 
-// ---- Charts: rebuilt from the #dash-data JSON island so AJAX refresh can redraw them ----
+// ---- Charts: rebuilt from the #dash-data JSON island so each panels swap can redraw them ----
 var _charts = [];
 function initCharts() {
     var el = document.getElementById('dash-data');
@@ -94,3 +134,4 @@ function initCharts() {
     mk('chartPiDisk', { type: 'line', data: { labels: D.pi_times, datasets: [{ data: D.pi_disk_vals, borderColor: cv('--chart-h21-border'), fill: false, tension: 0.3, pointRadius: 0, spanGaps: true }] }, options: chartOpts(0, null, null) });
 }
 initCharts();
+loadPanels();

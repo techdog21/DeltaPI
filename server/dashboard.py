@@ -2,9 +2,12 @@
 DeltaPi — dashboard context builder.
 
 Turns the raw log rows + latest Pi status into the fully-computed template
-context: every pill class/label, the pre-rendered Weather / Environment / Starlink
-HTML fragments, the readings table, and the Chart.js data island. Pure compute —
-no request handling, no HTML shell (that lives in templates/index.html).
+context in two independent stages: build_context (DB-only — every pill
+class/label, the readings table, the Chart.js data island) and build_external
+(the Weather / Environment / solar-forecast fragments from the eight external
+APIs, served later by /external so the page never waits on an upstream).
+placeholder_context supplies the instant page shell. Pure compute — no request
+handling, no HTML shell (that lives in templates/index.html).
 """
 import json
 import re
@@ -536,6 +539,188 @@ def build_context(conn, rows, days, now):
     else:
         wx_lat, wx_lon = HOME_LAT, HOME_LON              # home / can't tell -> home coords
 
+    # The eight external lookups (weather, alerts, AQI, …) are deferred to the
+    # /external endpoint so neither the page shell nor the local data ever waits
+    # on a third-party API. Everything that stage needs from this parse is
+    # bundled into ext_inputs at the bottom of the context.
+
+    # Sustainability Outlook (Solar panel): fuse measured daily harvest vs
+    # consumption, the current charge state, and the solar forecast into one
+    # forward-looking state (Self-sufficient / Sustaining / Drawing down / Critical).
+    ah = _avg_complete_days(h20_values)    # avg recent daily harvest (kWh)
+    ac = _avg_complete_days(cons_values)   # avg recent daily consumption (kWh)
+    net_w = battery.get("power") if batt_present else None   # + = charging
+    charging_now = bool(is_charging) or (net_w is not None and net_w >= 0)
+
+    # Power source: infer shore/generator vs off-grid from the energy balance.
+    # The MPPT only sees solar; the battery BMS sees net current from ALL sources.
+    # If the pack is charging faster than solar can supply, an external AC charger
+    # (shore power or a generator) is doing it. This detects active charging — not
+    # mere connection — and can't tell shore from a generator.
+    ps_class, ps_label = "gray", "—"
+    if batt_present and net_w is not None:
+        solar_to_batt_w = (voltages[0] * currents[0]) if parsed else 0   # MPPT output to battery (W)
+        if net_w - solar_to_batt_w > max(25.0, 0.15 * solar_to_batt_w):
+            ps_class, ps_label = "gray", "Shore / Generator"
+        else:
+            ps_class, ps_label = "green", "Solar / Battery"
+
+    # Preliminary outlook with an "unknown" forecast tier; /external recomputes
+    # it once the weather forecast is in and dashboard.js swaps the pill.
+    outlook_class, outlook_label = sustainability_outlook(
+        batt_present,
+        soc_percent if batt_present else None,
+        charging_now,
+        usable_wh,
+        ah * 1000 if ah is not None else None,
+        ac * 1000 if ac is not None else None,
+        "unknown",
+    )
+
+    ext_inputs = {
+        "wx_lat": wx_lat, "wx_lon": wx_lon, "ah": ah, "ac": ac,
+        "batt_present": batt_present,
+        "soc_percent": soc_percent if batt_present else None,
+        "charging_now": charging_now, "usable_wh": usable_wh,
+    }
+
+    # Disk status
+    data_percent, data_class, data_label = get_disk_status(DB_DIR)
+
+    # Readings table (chronological, oldest-first for display) — load/cs come from
+    # VE.Direct payloads (user-controlled via /log), so the template auto-escapes them.
+    table_rows = []
+    for ts, v, i, ppv, vpv, load, cs, err, h20, h21 in reversed(table_data):
+        table_rows.append({
+            "time": fmt_mt(ts), "v": v, "i": i, "power": round(v * i, 2),
+            "vpv": vpv, "load": load, "cs": cs, "h20": h20, "h21": h21,
+        })
+
+    # Pi-reported fields (auto-escaped by the template). Only used when pi_status_row exists.
+    if pi_status_row:
+        pi_name = (pi_status_row.get('pi_name') or '?').upper()
+        pi_os_val = pi_status_row.get('pi_os') or '?'
+        pi_uptime = pi_status_row.get('uptime') or '?'
+        pi_cpu_temp = pi_status_row.get('cpu_temp') or '?'
+        pi_fan_speed = pi_status_row.get('fan_speed') or '?'
+        pi_updates_val = pi_status_row.get('pi_updates') or '?'
+        pi_memory = pi_status_row.get('memory') or '?'
+        pi_disk = pi_status_row.get('disk') or '?'
+        pi_ssid = pi_status_row.get('ssid') or '?'
+        pi_wifi_signal = pi_status_row.get('wifi_signal') or '?'
+    else:
+        pi_name = pi_os_val = pi_uptime = pi_cpu_temp = pi_fan_speed = None
+        pi_updates_val = pi_memory = pi_disk = pi_ssid = pi_wifi_signal = None
+
+    # Backup health: the puller runs daily, so a latest backup < ~26 h old is
+    # healthy; older (or none) flips the pill so a silently-stopped puller shows.
+    _bc = pi_status_row.get("backup_count") if pi_status_row else None
+    backup_count_disp = _bc if (_bc and _bc != "unknown") else "—"
+    _bl = pi_status_row.get("backup_latest") if pi_status_row else None
+    try:
+        _bage = (datetime.now(timezone.utc) - ensure_utc(datetime.fromisoformat(_bl))).total_seconds() / 60
+        backup_age_label = f"{humanize_minutes(_bage)} ago"
+        backup_class, backup_pill_label = make_status_pill(_bage, [
+            (26 * 60, ("green", "fresh")), (50 * 60, ("yellow", "late")), (float('inf'), ("red", "stale"))
+        ])
+    except Exception:
+        backup_age_label, backup_class, backup_pill_label = "never", "gray", "none"
+
+    # ---- Pi health history for the Pi charts, bounded by the 7-day pi_status
+    # retention. Values are stored as display strings, so pull the leading number
+    # from each: °C for temp, MB-used for memory, % for fan, 1-min load average
+    # (cpu_load is blank on rows posted before the Pi logger started sending it). ----
+    def _first_num(s):
+        m = re.search(r'-?\d+(?:\.\d+)?', s) if s else None
+        return float(m.group()) if m else None
+
+    pi_hist = []
+    try:
+        pi_hist = conn.execute(
+            "SELECT timestamp, cpu_temp, memory, fan_speed, cpu_load, disk FROM pi_status "
+            "WHERE timestamp >= ? ORDER BY timestamp ASC", (since.isoformat(),)
+        ).fetchall()
+    except Exception as e:
+        server_log("GET", f"Pi history query failed: {e}", "warning")
+    stride = max(1, len(pi_hist) // 600)   # downsample (pi_status posts every ~30 s)
+    pi_sampled = pi_hist[::stride]
+    pi_times = [fmt_mt(r[0]) for r in pi_sampled]
+    pi_temp_vals = [_first_num(r[1]) for r in pi_sampled]   # °C
+    pi_mem_vals = [_first_num(r[2]) for r in pi_sampled]    # MB used
+    pi_fan_vals = [_first_num(r[3]) for r in pi_sampled]    # % duty
+    pi_load_vals = [_first_num(r[4]) for r in pi_sampled]   # 1-min load average
+    pi_disk_vals = [_first_num(r[5]) for r in pi_sampled]   # GB used (leading number of "12.3G/32G (39%)")
+
+    chart_payload = {
+        "timestamps": timestamps, "powers": powers, "charge_powers": charge_powers,
+        "voltage_timestamps": voltage_timestamps, "voltage_values": voltage_values,
+        "h20_days": h20_days, "h20_values": h20_values, "h20_ymax": h20_ymax,
+        "batt_times": batt_times, "batt_soc_values": batt_soc_values,
+        "batt_load_values": batt_load_values, "batt_temp_values": batt_temp_values,
+        "cons_days": cons_days, "cons_values": cons_values,
+        "SOC_DANGER": SOC_DANGER, "FREEZE_F": FREEZE_F,
+        "pi_times": pi_times, "pi_temp_vals": pi_temp_vals, "pi_mem_vals": pi_mem_vals,
+        "pi_fan_vals": pi_fan_vals, "pi_load_vals": pi_load_vals, "pi_disk_vals": pi_disk_vals,
+    }
+
+    return {
+        # header
+        "days": days, "MAX_DAYS": MAX_DAYS, "booting": False,
+        # battery panel
+        "soc_percent": soc_percent, "soc_color": soc_color, "soc_label": soc_label,
+        "latest_voltage": latest_voltage, "latest_voltage_class": latest_voltage_class,
+        "latest_voltage_label": latest_voltage_label,
+        "batt_per_display": batt_per_display, "batt_feed_class": batt_feed_class,
+        "batt_feed_label": batt_feed_label, "ps_class": ps_class, "ps_label": ps_label,
+        "batt_temp_str": batt_temp_str, "btemp_class": btemp_class, "btemp_label": btemp_label,
+        "cell_class": cell_class, "cell_label": cell_label,
+        "house_load_str": house_load_str, "runtime_str": runtime_str, "ttf_str": ttf_str,
+        # solar panel
+        "status_color": status_color, "status_text": status_text,
+        "ctrl_class": ctrl_class, "ctrl_label": ctrl_label,
+        "mode_class": mode_class, "mode_label": mode_label,
+        "solar_now": solar_now, "charge_now_a_str": f"{charge_now_a:.1f}",
+        "solar_class": solar_class, "solar_label": solar_label,
+        "today_yield_str": f"{today_yield:.2f}",
+        "latest_vpv_str": f"{latest_vpv:.2f}", "vpv_color": vpv_color, "vpv_message": vpv_message,
+        "outlook_class": outlook_class, "outlook_label": outlook_label,
+        # starlink panel
+        "sl_status_class": sl_status_class, "sl_status_label": sl_status_label,
+        "dish_class": dish_class, "dish_label": dish_label, "sl_streak_html": sl_streak_html,
+        "sl_obs_str": sl_obs_str, "sl_obs_class": sl_obs_class, "sl_obs_label": sl_obs_label,
+        "sl_alert_class": sl_alert_class, "sl_alert_label": sl_alert_label,
+        "sl_speed_str": sl_speed_str, "sl_latency_str": sl_latency_str,
+        # pi health panel
+        "pi_status_row": pi_status_row,
+        "pi_name": pi_name, "pi_os_val": pi_os_val, "pi_uptime": pi_uptime,
+        "pi_cpu_temp": pi_cpu_temp, "pi_fan_speed": pi_fan_speed, "pi_updates_val": pi_updates_val,
+        "pi_memory": pi_memory, "pi_disk": pi_disk, "pi_ssid": pi_ssid, "pi_wifi_signal": pi_wifi_signal,
+        "backup_count_disp": backup_count_disp, "backup_age_label": backup_age_label,
+        "backup_class": backup_class, "backup_pill_label": backup_pill_label,
+        "controller_class": controller_class, "controller_label": controller_label,
+        "checkin_class": checkin_class, "checkin_label": checkin_label,
+        "temp_class": temp_class, "temp_label": temp_label,
+        "fan_class": fan_class, "fan_label": fan_label,
+        "updates_class": updates_class, "updates_label": updates_label,
+        "wifi_class": wifi_class, "wifi_label": wifi_label,
+        "data_percent": data_percent, "data_class": data_class, "data_label": data_label,
+        "existing_days": existing_days,
+        # table + charts
+        "table_rows": table_rows, "chart_payload": chart_payload,
+        # inputs for the deferred /external stage (popped by the route, never rendered)
+        "ext_inputs": ext_inputs,
+    }
+
+
+def build_external(inp):
+    """Fetch the eight external providers and build the deferred page fragments:
+    the Weather / Environment panel bodies, the Solar-forecast row, and the final
+    Sustainability Outlook (whose tier depends on the weather forecast). `inp` is
+    the ext_inputs dict produced by build_context; the /external route serves the
+    result after the shell and local panels have already been delivered."""
+    wx_lat, wx_lon = inp["wx_lat"], inp["wx_lon"]
+    ah, ac = inp["ah"], inp["ac"]
+
     # All eight external lookups are independent (lat, lon) fetches with their own
     # caches and timeouts, so run them concurrently: a cold render costs roughly
     # the single slowest call instead of the serial sum, and one hung upstream
@@ -777,27 +962,6 @@ def build_context(conn, rows, days, now):
             sg_cls, sg_lbl = "gray", "Poor"
         environment_html += f'<div class="metric"><span class="metric-label">Stargazing</span><span class="metric-value"><span class="pill {sg_cls}">{sg_lbl}</span></span></div>'
 
-    # Sustainability Outlook (Solar panel): fuse measured daily harvest vs
-    # consumption, the current charge state, and the solar forecast into one
-    # forward-looking state (Self-sufficient / Sustaining / Drawing down / Critical).
-    ah = _avg_complete_days(h20_values)    # avg recent daily harvest (kWh)
-    ac = _avg_complete_days(cons_values)   # avg recent daily consumption (kWh)
-    net_w = battery.get("power") if batt_present else None   # + = charging
-    charging_now = bool(is_charging) or (net_w is not None and net_w >= 0)
-
-    # Power source: infer shore/generator vs off-grid from the energy balance.
-    # The MPPT only sees solar; the battery BMS sees net current from ALL sources.
-    # If the pack is charging faster than solar can supply, an external AC charger
-    # (shore power or a generator) is doing it. This detects active charging — not
-    # mere connection — and can't tell shore from a generator.
-    ps_class, ps_label = "gray", "—"
-    if batt_present and net_w is not None:
-        solar_to_batt_w = (voltages[0] * currents[0]) if parsed else 0   # MPPT output to battery (W)
-        if net_w - solar_to_batt_w > max(25.0, 0.15 * solar_to_batt_w):
-            ps_class, ps_label = "gray", "Shore / Generator"
-        else:
-            ps_class, ps_label = "green", "Solar / Battery"
-
     # Solar production forecast: predicted kWh derived from the Open-Meteo daily
     # shortwave radiation we already fetch — kWh = (GHI MJ/m^2 / 3.6) * kWp * PR.
     # For flat-mounted panels GHI is the plane-of-array irradiance, so no tilt
@@ -819,138 +983,59 @@ def build_context(conn, rows, days, now):
                          f'<span class="metric-value">{tomo_str} tomorrow <span class="pill {fc_cls}">{forecast_tier.title()}</span></span></div>')
 
     outlook_class, outlook_label = sustainability_outlook(
-        batt_present,
-        soc_percent if batt_present else None,
-        charging_now,
-        usable_wh,
+        inp["batt_present"], inp["soc_percent"], inp["charging_now"],
+        inp["usable_wh"],
         ah * 1000 if ah is not None else None,
         ac * 1000 if ac is not None else None,
         forecast_tier,
     )
 
-    # Disk status
-    data_percent, data_class, data_label = get_disk_status(DB_DIR)
-
-    # Readings table (chronological, oldest-first for display) — load/cs come from
-    # VE.Direct payloads (user-controlled via /log), so the template auto-escapes them.
-    table_rows = []
-    for ts, v, i, ppv, vpv, load, cs, err, h20, h21 in reversed(table_data):
-        table_rows.append({
-            "time": fmt_mt(ts), "v": v, "i": i, "power": round(v * i, 2),
-            "vpv": vpv, "load": load, "cs": cs, "h20": h20, "h21": h21,
-        })
-
-    # Pi-reported fields (auto-escaped by the template). Only used when pi_status_row exists.
-    if pi_status_row:
-        pi_name = (pi_status_row.get('pi_name') or '?').upper()
-        pi_os_val = pi_status_row.get('pi_os') or '?'
-        pi_uptime = pi_status_row.get('uptime') or '?'
-        pi_cpu_temp = pi_status_row.get('cpu_temp') or '?'
-        pi_fan_speed = pi_status_row.get('fan_speed') or '?'
-        pi_updates_val = pi_status_row.get('pi_updates') or '?'
-        pi_memory = pi_status_row.get('memory') or '?'
-        pi_disk = pi_status_row.get('disk') or '?'
-        pi_ssid = pi_status_row.get('ssid') or '?'
-        pi_wifi_signal = pi_status_row.get('wifi_signal') or '?'
-    else:
-        pi_name = pi_os_val = pi_uptime = pi_cpu_temp = pi_fan_speed = None
-        pi_updates_val = pi_memory = pi_disk = pi_ssid = pi_wifi_signal = None
-
-    # Backup health: the puller runs daily, so a latest backup < ~26 h old is
-    # healthy; older (or none) flips the pill so a silently-stopped puller shows.
-    _bc = pi_status_row.get("backup_count") if pi_status_row else None
-    backup_count_disp = _bc if (_bc and _bc != "unknown") else "—"
-    _bl = pi_status_row.get("backup_latest") if pi_status_row else None
-    try:
-        _bage = (datetime.now(timezone.utc) - ensure_utc(datetime.fromisoformat(_bl))).total_seconds() / 60
-        backup_age_label = f"{humanize_minutes(_bage)} ago"
-        backup_class, backup_pill_label = make_status_pill(_bage, [
-            (26 * 60, ("green", "fresh")), (50 * 60, ("yellow", "late")), (float('inf'), ("red", "stale"))
-        ])
-    except Exception:
-        backup_age_label, backup_class, backup_pill_label = "never", "gray", "none"
-
-    # ---- Pi health history for the Pi charts, bounded by the 7-day pi_status
-    # retention. Values are stored as display strings, so pull the leading number
-    # from each: °C for temp, MB-used for memory, % for fan, 1-min load average
-    # (cpu_load is blank on rows posted before the Pi logger started sending it). ----
-    def _first_num(s):
-        m = re.search(r'-?\d+(?:\.\d+)?', s) if s else None
-        return float(m.group()) if m else None
-
-    pi_hist = []
-    try:
-        pi_hist = conn.execute(
-            "SELECT timestamp, cpu_temp, memory, fan_speed, cpu_load, disk FROM pi_status "
-            "WHERE timestamp >= ? ORDER BY timestamp ASC", (since.isoformat(),)
-        ).fetchall()
-    except Exception as e:
-        server_log("GET", f"Pi history query failed: {e}", "warning")
-    stride = max(1, len(pi_hist) // 600)   # downsample (pi_status posts every ~30 s)
-    pi_sampled = pi_hist[::stride]
-    pi_times = [fmt_mt(r[0]) for r in pi_sampled]
-    pi_temp_vals = [_first_num(r[1]) for r in pi_sampled]   # °C
-    pi_mem_vals = [_first_num(r[2]) for r in pi_sampled]    # MB used
-    pi_fan_vals = [_first_num(r[3]) for r in pi_sampled]    # % duty
-    pi_load_vals = [_first_num(r[4]) for r in pi_sampled]   # 1-min load average
-    pi_disk_vals = [_first_num(r[5]) for r in pi_sampled]   # GB used (leading number of "12.3G/32G (39%)")
-
-    chart_payload = {
-        "timestamps": timestamps, "powers": powers, "charge_powers": charge_powers,
-        "voltage_timestamps": voltage_timestamps, "voltage_values": voltage_values,
-        "h20_days": h20_days, "h20_values": h20_values, "h20_ymax": h20_ymax,
-        "batt_times": batt_times, "batt_soc_values": batt_soc_values,
-        "batt_load_values": batt_load_values, "batt_temp_values": batt_temp_values,
-        "cons_days": cons_days, "cons_values": cons_values,
-        "SOC_DANGER": SOC_DANGER, "FREEZE_F": FREEZE_F,
-        "pi_times": pi_times, "pi_temp_vals": pi_temp_vals, "pi_mem_vals": pi_mem_vals,
-        "pi_fan_vals": pi_fan_vals, "pi_load_vals": pi_load_vals, "pi_disk_vals": pi_disk_vals,
+    return {
+        "weather_html": weather_html, "environment_html": environment_html,
+        "solar_fc_html": solar_fc_html,
+        "outlook_class": outlook_class, "outlook_label": outlook_label,
     }
 
+
+def placeholder_context(days):
+    """Context for the instant page shell: every metric renders as a neutral
+    loading placeholder with no DB or API work at all. dashboard.js then fills
+    the page from /panels (local data) and /external (third-party lookups)."""
+    pc, pl = "gray", "…"    # placeholder pill class / label
+    empty_charts = {k: [] for k in (
+        "timestamps", "powers", "charge_powers", "voltage_timestamps",
+        "voltage_values", "h20_days", "h20_values", "batt_times",
+        "batt_soc_values", "batt_load_values", "batt_temp_values",
+        "cons_days", "cons_values", "pi_times", "pi_temp_vals", "pi_mem_vals",
+        "pi_fan_vals", "pi_load_vals", "pi_disk_vals",
+    )}
+    empty_charts.update({"h20_ymax": 1.6, "SOC_DANGER": 20, "FREEZE_F": 32})
     return {
-        # header
-        "days": days, "MAX_DAYS": MAX_DAYS,
+        "days": days, "MAX_DAYS": MAX_DAYS, "booting": True,
         # battery panel
-        "soc_percent": soc_percent, "soc_color": soc_color, "soc_label": soc_label,
-        "latest_voltage": latest_voltage, "latest_voltage_class": latest_voltage_class,
-        "latest_voltage_label": latest_voltage_label,
-        "batt_per_display": batt_per_display, "batt_feed_class": batt_feed_class,
-        "batt_feed_label": batt_feed_label, "ps_class": ps_class, "ps_label": ps_label,
-        "batt_temp_str": batt_temp_str, "btemp_class": btemp_class, "btemp_label": btemp_label,
-        "cell_class": cell_class, "cell_label": cell_label,
-        "house_load_str": house_load_str, "runtime_str": runtime_str, "ttf_str": ttf_str,
+        "soc_percent": "—", "soc_color": pc, "soc_label": pl,
+        "latest_voltage": "—", "latest_voltage_class": pc, "latest_voltage_label": pl,
+        "batt_per_display": "", "batt_feed_class": pc, "batt_feed_label": pl,
+        "ps_class": pc, "ps_label": pl,
+        "batt_temp_str": "—", "btemp_class": pc, "btemp_label": pl,
+        "cell_class": pc, "cell_label": pl,
+        "house_load_str": "—", "runtime_str": "—", "ttf_str": "—",
         # solar panel
-        "status_color": status_color, "status_text": status_text,
-        "ctrl_class": ctrl_class, "ctrl_label": ctrl_label,
-        "mode_class": mode_class, "mode_label": mode_label,
-        "solar_now": solar_now, "charge_now_a_str": f"{charge_now_a:.1f}",
-        "solar_class": solar_class, "solar_label": solar_label,
-        "today_yield_str": f"{today_yield:.2f}", "solar_fc_html": solar_fc_html,
-        "latest_vpv_str": f"{latest_vpv:.2f}", "vpv_color": vpv_color, "vpv_message": vpv_message,
-        "outlook_class": outlook_class, "outlook_label": outlook_label,
+        "status_color": pc, "status_text": "Loading…",
+        "ctrl_class": pc, "ctrl_label": pl, "mode_class": pc, "mode_label": pl,
+        "solar_now": "—", "charge_now_a_str": "—",
+        "solar_class": pc, "solar_label": pl,
+        "today_yield_str": "—", "latest_vpv_str": "—",
+        "vpv_color": pc, "vpv_message": pl,
+        "outlook_class": pc, "outlook_label": pl,
         # starlink panel
-        "sl_status_class": sl_status_class, "sl_status_label": sl_status_label,
-        "dish_class": dish_class, "dish_label": dish_label, "sl_streak_html": sl_streak_html,
-        "sl_obs_str": sl_obs_str, "sl_obs_class": sl_obs_class, "sl_obs_label": sl_obs_label,
-        "sl_alert_class": sl_alert_class, "sl_alert_label": sl_alert_label,
-        "sl_speed_str": sl_speed_str, "sl_latency_str": sl_latency_str,
-        # weather / environment panels
-        "weather_html": weather_html, "environment_html": environment_html,
-        # pi health panel
-        "pi_status_row": pi_status_row,
-        "pi_name": pi_name, "pi_os_val": pi_os_val, "pi_uptime": pi_uptime,
-        "pi_cpu_temp": pi_cpu_temp, "pi_fan_speed": pi_fan_speed, "pi_updates_val": pi_updates_val,
-        "pi_memory": pi_memory, "pi_disk": pi_disk, "pi_ssid": pi_ssid, "pi_wifi_signal": pi_wifi_signal,
-        "backup_count_disp": backup_count_disp, "backup_age_label": backup_age_label,
-        "backup_class": backup_class, "backup_pill_label": backup_pill_label,
-        "controller_class": controller_class, "controller_label": controller_label,
-        "checkin_class": checkin_class, "checkin_label": checkin_label,
-        "temp_class": temp_class, "temp_label": temp_label,
-        "fan_class": fan_class, "fan_label": fan_label,
-        "updates_class": updates_class, "updates_label": updates_label,
-        "wifi_class": wifi_class, "wifi_label": wifi_label,
-        "data_percent": data_percent, "data_class": data_class, "data_label": data_label,
-        "existing_days": existing_days,
+        "sl_status_class": pc, "sl_status_label": pl,
+        "dish_class": pc, "dish_label": pl, "sl_streak_html": "",
+        "sl_obs_str": "—", "sl_obs_class": pc, "sl_obs_label": pl,
+        "sl_alert_class": pc, "sl_alert_label": pl,
+        "sl_speed_str": "—", "sl_latency_str": "—",
+        # pi health panel (the template's booting branch renders instead)
+        "pi_status_row": None,
         # table + charts
-        "table_rows": table_rows, "chart_payload": chart_payload,
+        "table_rows": [], "chart_payload": empty_charts,
     }

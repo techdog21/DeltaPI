@@ -4,7 +4,11 @@ services:
     env: python
     plan: starter
     buildCommand: pip install -r server/requirements.txt
-    startCommand: gunicorn --chdir server app:app --bind 0.0.0.0:$PORT
+    # --threads: the dashboard now loads progressively (/ shell, then /panels,
+    # then /external), so the server must handle overlapping requests — with the
+    # default single sync worker a slow /external would queue everything behind it.
+    # One worker (not several) keeps the in-process render/API caches shared.
+    startCommand: gunicorn --chdir server app:app --bind 0.0.0.0:$PORT --threads 4
     disk:
       name: data
       mountPath: /data

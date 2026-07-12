@@ -62,14 +62,14 @@ the root.
 
 | Path | Purpose |
 |---|---|
-| `app.py` | Flask entry point: ingestion routes (`/log`, `/log/bulk`, `/status`), `/encrypt_days`, and the dashboard route |
+| `app.py` | Flask entry point: ingestion routes (`/log`, `/log/bulk`, `/status`), `/encrypt_days`, and the dashboard routes (`/` shell, `/panels`, `/external`) |
 | `config.py` | Env-derived settings and static lookup tables (VE.Direct/WMO/AQI/flood maps) |
 | `util.py` | Cross-cutting helpers: logging, formatters, token decryption, geo + moon math |
 | `db.py` | SQLite schema, per-request connections, and throttled retention cleanup |
 | `integrations.py` | Cached, failure-tolerant external providers (weather, AQI, NWS, fire, quake, aurora, river, geocode) |
 | `energy.py` | Battery/solar model: SOC estimate, runtime, sustainability outlook, empirical load |
-| `dashboard.py` | Builds the template context from log rows + Pi status |
-| `templates/index.html`, `static/style.css`, `static/dashboard.js` | Dashboard markup, styles, and Chart.js wiring |
+| `dashboard.py` | Builds the template context from log rows + Pi status (DB stage) and the deferred weather/environment fragments (external stage) |
+| `templates/index.html`, `templates/panels.html`, `static/style.css`, `static/dashboard.js` | Dashboard shell + panels fragment, styles, and the progressive-load / Chart.js wiring |
 | `requirements.txt` | Server Python dependencies |
 
 **`pi/` — field agent on the Raspberry Pi**
@@ -199,14 +199,17 @@ Deploy via Blueprint: **New → Blueprint** in Render, point it at this repo, an
 start commands. You'll be prompted for `POST_SECRET` and `FERNET_KEY` (kept out of
 the repo via `sync: false`); optional vars from the table above can be added too.
 
-- Build: `pip install -r server/requirements.txt` · Start: `gunicorn --chdir server app:app --bind 0.0.0.0:$PORT`
+- Build: `pip install -r server/requirements.txt` · Start: `gunicorn --chdir server app:app --bind 0.0.0.0:$PORT --threads 4`
+  (the threads matter: the dashboard loads progressively, so `/panels`, `/external`, and Pi uploads overlap — if the Render dashboard overrides the start command, update it there too)
 - Local dev: `cd server && POST_SECRET=x FERNET_KEY=$(...) python app.py`
 
 ## Routes
 
 | Route | Method | Rate limit | Description |
 |---|---|---|---|
-| `/` | GET | — | Dashboard |
+| `/` | GET | — | Dashboard shell (instant; placeholders only) |
+| `/panels` | GET | — | Dashboard panels fragment (local DB data; cached per date range) |
+| `/external` | GET | — | Weather/Environment fragments (the eight third-party API lookups) |
 | `/log` | POST | 3/min | Single solar entry |
 | `/log/bulk` | POST | 5/min | Bulk entries (primary ingestion) |
 | `/status` | POST | 2/min | Pi health + merged feeds |

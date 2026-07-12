@@ -1,0 +1,172 @@
+<!-- Dashboard panels fragment: rendered with placeholder_context for the instant
+     shell (/), and with the real build_context by /panels, whose response replaces
+     the .dashboard contents wholesale. The Weather / Environment bodies and the
+     Solar forecast + Outlook pills are filled later by /external via their ids. -->
+
+    <!-- Battery Array (listed first: the priority view on a phone at camp) -->
+    <div class="panel">
+        <h2>Battery Array</h2>
+        <div class="metric"><span class="metric-label">SOC</span><span class="metric-value">{{ soc_percent }}% <span class="pill {{ soc_color }}">{{ soc_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Battery V</span><span class="metric-value">{{ latest_voltage }} <span class="pill {{ latest_voltage_class }}">{{ latest_voltage_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Battery feed</span><span class="metric-value">{{ batt_per_display }}<span class="pill {{ batt_feed_class }}">{{ batt_feed_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Power source</span><span class="metric-value"><span class="pill {{ ps_class }}">{{ ps_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Temperature</span><span class="metric-value">{{ batt_temp_str }} <span class="pill {{ btemp_class }}">{{ btemp_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Cell balance</span><span class="metric-value"><span class="pill {{ cell_class }}">{{ cell_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Consumption</span><span class="metric-value">{{ house_load_str }}</span></div>
+        <div class="metric"><span class="metric-label">Battery-only runtime</span><span class="metric-value">{{ runtime_str }}</span></div>
+        <div class="metric"><span class="metric-label">Time to full</span><span class="metric-value">{{ ttf_str }}</span></div>
+    </div>
+
+    <!-- Solar System -->
+    <div class="panel">
+        <h2>Solar System</h2>
+        <div class="metric"><span class="metric-label">Solar data</span><span class="metric-value"><span class="pill {{ status_color }}">{{ status_text }}</span></span></div>
+        <div class="metric"><span class="metric-label">Controller</span><span class="metric-value"><span class="pill {{ ctrl_class }}">{{ ctrl_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Mode</span><span class="metric-value"><span class="pill {{ mode_class }}">{{ mode_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Solar power</span><span class="metric-value">{{ solar_now }} W ({{ charge_now_a_str }} A) <span class="pill {{ solar_class }}">{{ solar_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Yield today</span><span class="metric-value">{{ today_yield_str }} kWh</span></div>
+        <div id="solarFc"></div>
+        <div class="metric"><span class="metric-label">Panel V</span><span class="metric-value">{{ latest_vpv_str }} V <span class="pill {{ vpv_color }}">{{ vpv_message }}</span></span></div>
+        <div class="metric"><span class="metric-label">Sustainability Outlook</span><span class="metric-value"><span id="outlookPill" class="pill {{ outlook_class }}">{{ outlook_label }}</span></span></div>
+    </div>
+
+    <!-- Starlink -->
+    <div class="panel">
+        <h2>Starlink</h2>
+        <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill {{ sl_status_class }}">{{ sl_status_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Dish</span><span class="metric-value"><span class="pill {{ dish_class }}">{{ dish_label }}</span></span></div>
+        {{ sl_streak_html | safe }}
+        <div class="metric"><span class="metric-label">Obstruction</span><span class="metric-value">{{ sl_obs_str }} <span class="pill {{ sl_obs_class }}">{{ sl_obs_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Alerts</span><span class="metric-value"><span class="pill {{ sl_alert_class }}">{{ sl_alert_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Speed</span><span class="metric-value">{{ sl_speed_str }}</span></div>
+        <div class="metric"><span class="metric-label">Latency</span><span class="metric-value">{{ sl_latency_str }}</span></div>
+    </div>
+
+    <!-- Weather (Open-Meteo, dish location) — body filled by /external -->
+    <div class="panel">
+        <h2>Weather</h2>
+        <div id="weatherBody">
+            <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill gray">Loading…</span></span></div>
+        </div>
+    </div>
+
+    <!-- Environment: severe-weather alerts, air quality, solar window — body filled by /external -->
+    <div class="panel">
+        <h2>Environment</h2>
+        <div id="envBody">
+            <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill gray">Loading…</span></span></div>
+        </div>
+    </div>
+
+    <!-- Pi Health -->
+    <div class="panel">
+        {% if pi_status_row %}
+        <h2>Pi Health — {{ pi_name }}</h2>
+        <div class="metric"><span class="metric-label">Link</span><span class="metric-value"><span class="pill {{ controller_class }}">{{ controller_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">OS</span><span class="metric-value">{{ pi_os_val }}</span></div>
+        <div class="metric"><span class="metric-label">Uptime</span><span class="metric-value">{{ pi_uptime }}</span></div>
+        <div class="metric"><span class="metric-label">Last Check-in</span><span class="metric-value"><span class="pill {{ checkin_class }}">{{ checkin_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">CPU / Fan</span><span class="metric-value">{{ pi_cpu_temp }} <span class="pill {{ temp_class }}">{{ temp_label }}</span> {{ pi_fan_speed }} <span class="pill {{ fan_class }}">{{ fan_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Updates</span><span class="metric-value">{{ pi_updates_val }} <span class="pill {{ updates_class }}">{{ updates_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Mem / Disk</span><span class="metric-value">{{ pi_memory }} / {{ pi_disk }}</span></div>
+        <div class="metric"><span class="metric-label">Backups</span><span class="metric-value">{{ backup_count_disp }} · {{ backup_age_label }} <span class="pill {{ backup_class }}">{{ backup_pill_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Wi-Fi</span><span class="metric-value">{{ pi_ssid }} {{ pi_wifi_signal }} <span class="pill {{ wifi_class }}">{{ wifi_label }}</span></span></div>
+        <div class="metric"><span class="metric-label">Data storage</span><span class="metric-value">{{ data_percent }}% used <span class="pill {{ data_class }}">{{ data_label }}</span> · {{ existing_days }} of 365 d</span></div>
+        {% elif booting %}
+        <h2>Pi Health</h2>
+        <p style="color:#666; font-size:12px;">Loading…</p>
+        {% else %}
+        <h2>Pi Health</h2>
+        <p style="color:#666; font-size:12px;">No Pi status data available.</p>
+        {% endif %}
+    </div>
+
+    <!-- Chart: Solar Power -->
+    <div class="chart-panel">
+        <h2>Solar Power (W)</h2>
+        <div class="chart-wrap"><canvas id="chartPower"></canvas></div>
+    </div>
+
+    <!-- Chart: Battery Voltage -->
+    <div class="chart-panel">
+        <h2>Battery Voltage (V)</h2>
+        <div class="chart-wrap"><canvas id="chartVoltage"></canvas></div>
+    </div>
+
+    <!-- Chart: Daily Energy H20 -->
+    <div class="chart-panel">
+        <h2>Daily Energy (kWh)</h2>
+        <div class="chart-wrap"><canvas id="chartH20"></canvas></div>
+    </div>
+
+    <!-- Chart: Battery SOC (measured) -->
+    <div class="chart-panel">
+        <h2>Battery SOC (%)</h2>
+        <div class="chart-wrap"><canvas id="chartSOC"></canvas></div>
+    </div>
+
+    <!-- Chart: Consumption (measured) -->
+    <div class="chart-panel">
+        <h2>Consumption (W)</h2>
+        <div class="chart-wrap"><canvas id="chartLoad"></canvas></div>
+    </div>
+
+    <!-- Chart: Charge Power to battery (MPPT output) -->
+    <div class="chart-panel">
+        <h2>Charge Power (W)</h2>
+        <div class="chart-wrap"><canvas id="chartCharge"></canvas></div>
+    </div>
+
+    <!-- Chart: Battery Temperature (measured) -->
+    <div class="chart-panel">
+        <h2>Battery Temp (°F)</h2>
+        <div class="chart-wrap"><canvas id="chartTemp"></canvas></div>
+    </div>
+
+    <!-- Chart: Daily Consumption (measured) -->
+    <div class="chart-panel">
+        <h2>Daily Consumption (kWh)</h2>
+        <div class="chart-wrap"><canvas id="chartConsDaily"></canvas></div>
+    </div>
+
+    <!-- Chart: Pi CPU Temp + Fan -->
+    <div class="chart-panel">
+        <h2>Pi CPU Temp (°C) &amp; Fan (%)</h2>
+        <div class="chart-wrap"><canvas id="chartPiTemp"></canvas></div>
+    </div>
+
+    <!-- Chart: Pi Memory -->
+    <div class="chart-panel">
+        <h2>Pi Memory (MB used)</h2>
+        <div class="chart-wrap"><canvas id="chartPiMem"></canvas></div>
+    </div>
+
+    <!-- Chart: Pi CPU Load -->
+    <div class="chart-panel">
+        <h2>Pi CPU Load (1-min)</h2>
+        <div class="chart-wrap"><canvas id="chartPiLoad"></canvas></div>
+    </div>
+
+    <!-- Chart: Pi Disk -->
+    <div class="chart-panel">
+        <h2>Pi Disk (GB used)</h2>
+        <div class="chart-wrap"><canvas id="chartPiDisk"></canvas></div>
+    </div>
+
+    <!-- Latest Readings Table -->
+    <div class="table-panel">
+        <h2>Latest Readings</h2>
+        <table>
+            <thead><tr>
+                <th>Time</th><th>Voltage</th><th>Current</th><th>Power</th>
+                <th>Panel V</th><th>Load</th><th>Mode</th><th>H20</th><th>H21</th>
+            </tr></thead>
+            <tbody>
+            {% for r in table_rows %}
+                <tr><td>{{ r.time }}</td><td>{{ r.v }}</td><td>{{ r.i }}</td><td>{{ r.power }}</td>
+                <td>{{ r.vpv }}</td><td>{{ r.load }}</td><td>{{ r.cs }}</td><td>{{ r.h20 }}</td><td>{{ r.h21 }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <script id="dash-data" type="application/json">{{ chart_payload | tojson }}</script>
