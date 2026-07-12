@@ -44,6 +44,7 @@ from config import POST_SECRET, fernet, MAX_DAYS, DB_DIR
 from util import server_log, decrypt_token
 from db import get_db, close_db, maybe_cleanup
 from dashboard import build_context, build_external, placeholder_context
+from integrations import note_view, start_background_refresh
 
 # ------------------ App Setup ------------------ #
 app = Flask(__name__)
@@ -53,6 +54,10 @@ app.teardown_appcontext(close_db)
 
 limiter = Limiter(key_func=get_remote_address)
 limiter.init_app(app)
+
+# Keep the external-API caches warm (ahead of their TTLs) while the dashboard
+# is being viewed, so /external is a cache read instead of a live upstream pull.
+start_background_refresh()
 
 
 @app.errorhandler(413)
@@ -441,6 +446,9 @@ def external():
         except Exception as e:
             server_log("GET", f"/external local compute failed: {e}", "error")
             return jsonify({"error": "unavailable"}), 500
+    # Tell the background refresher this location is being watched, so it keeps
+    # the provider caches warm and the next call here is a pure cache read.
+    note_view(ext_inputs["wx_lat"], ext_inputs["wx_lon"])
     return jsonify(build_external(ext_inputs))
 
 

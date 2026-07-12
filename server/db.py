@@ -52,6 +52,18 @@ def init_db():
                 backup_latest TEXT DEFAULT 'unknown'
             )
         """)
+        # Persistent tier of the external-API cache (see integrations.py):
+        # one row per (provider, rounded location), overwritten on refresh, so
+        # weather & friends survive deploys/restarts instead of a cold re-pull.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ext_cache (
+                provider TEXT NOT NULL,
+                loc_key TEXT NOT NULL,
+                epoch REAL NOT NULL,
+                data TEXT NOT NULL,
+                PRIMARY KEY (provider, loc_key)
+            )
+        """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pi_status_timestamp ON pi_status (timestamp)")
         # Migrate: add any missing optional columns to pi_status
@@ -112,6 +124,10 @@ def cleanup_old_records():
     deleted_logs = conn.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff,)).rowcount
     status_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     deleted_status = conn.execute("DELETE FROM pi_status WHERE timestamp < ?", (status_cutoff,)).rowcount
+    # Drop ext_cache rows for locations nobody has viewed in a week (a roaming
+    # rig leaves one row per provider per rounded location behind).
+    conn.execute("DELETE FROM ext_cache WHERE epoch < ?",
+                 (time_module.time() - 7 * 86400,))
     conn.commit()
     if deleted_logs or deleted_status:
         server_log("DB", f"Cleanup: removed {deleted_logs} logs (>365d) and {deleted_status} pi_status (>7d)", "info")

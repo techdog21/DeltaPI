@@ -66,7 +66,7 @@ the root.
 | `config.py` | Env-derived settings and static lookup tables (VE.Direct/WMO/AQI/flood maps) |
 | `util.py` | Cross-cutting helpers: logging, formatters, token decryption, geo + moon math |
 | `db.py` | SQLite schema, per-request connections, and throttled retention cleanup |
-| `integrations.py` | Cached, failure-tolerant external providers (weather, AQI, NWS, fire, quake, aurora, river, geocode) |
+| `integrations.py` | Failure-tolerant external providers (weather, AQI, NWS, fire, quake, aurora, river, geocode) with a two-tier cache (memory + SQLite, survives deploys) and a view-gated background refresher |
 | `energy.py` | Battery/solar model: SOC estimate, runtime, sustainability outlook, empirical load |
 | `dashboard.py` | Builds the template context from log rows + Pi status (DB stage) and the deferred weather/environment fragments (external stage) |
 | `templates/index.html`, `templates/panels.html`, `static/style.css`, `static/dashboard.js` | Dashboard shell + panels fragment, styles, and the progressive-load / Chart.js wiring |
