@@ -91,6 +91,14 @@ def init_db():
             if not conn.execute("SELECT 1 FROM app_settings WHERE key = 'active_location'").fetchone():
                 conn.execute("INSERT INTO app_settings (key, value) VALUES ('active_location', ?)",
                              (str(first_id),))
+        # One-time correction: the first Grayback Gulch seed shipped with Melba's
+        # coordinates by mistake (the real spot is up past Idaho City in the Boise
+        # NF). Fix any DB still carrying the wrong point; a user-edited row won't
+        # match these exact values, so it's left alone. Safe to remove later.
+        conn.execute(
+            "UPDATE locations SET lat = ?, lon = ? "
+            "WHERE name = 'Grayback Gulch' AND lat = 43.4451 AND lon = -116.5296",
+            (43.80673, -115.868826))
         conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pi_status_timestamp ON pi_status (timestamp)")
         # Migrate: add any missing optional columns to pi_status

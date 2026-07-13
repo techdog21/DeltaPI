@@ -65,7 +65,7 @@ HOME_DISH_ID = os.environ.get("HOME_DISH_ID")  # round home dish id -> use HOME_
 # Starlink Mini): pick your spot from the dropdown instead of relying on the
 # dish. West longitudes are negative. The first entry is selected on a fresh DB.
 SEED_LOCATIONS = [
-    {"name": "Grayback Gulch", "lat": 43.4451, "lon": -116.5296},
+    {"name": "Grayback Gulch", "lat": 43.80673, "lon": -115.868826},  # Boise NF, past Idaho City
 ]
 FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY")  # NASA FIRMS wildfire detections (free signup)
 SOLAR_KWP = _env_float("SOLAR_KWP")        # array peak kW for the solar forecast (e.g. 0.3 = 300 W)
