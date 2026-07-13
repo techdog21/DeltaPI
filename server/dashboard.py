@@ -26,7 +26,7 @@ from energy import (estimate_soc, soc_pill, sustainability_outlook,
                     estimate_avg_load_w, build_voltage_series, _sl_up)
 from integrations import (get_weather, get_air_quality, get_nws_alerts, get_place,
                           get_wildfires, get_quake, get_aurora, get_river)
-from db import get_disk_status
+from db import get_disk_status, get_active_location
 
 # One point per chart pixel is plenty: at one frame per ~15 s a 7-day window is
 # ~40k rows, and shipping them all makes the chart data island multi-MB and the
@@ -529,10 +529,15 @@ def build_context(conn, rows, days, now):
     else:
         dish_class, dish_label = "gray", "—"
 
-    # ---- Weather location: dish GPS (Mini) -> home dish id -> home coords; else unknown ----
+    # ---- Weather location: manual pin (header dropdown) -> dish GPS (Mini) ->
+    # home dish id -> home coords; else unknown. The manual pin wins so a dish
+    # that won't share GPS (e.g. the Mini) can still get local weather. ----
     dish_id = (starlink or {}).get("id")
     dlat, dlon = (starlink or {}).get("lat"), (starlink or {}).get("lon")
-    if dlat is not None:
+    manual_loc = get_active_location(conn)               # None = Auto (follow GPS)
+    if manual_loc:
+        wx_lat, wx_lon = manual_loc["lat"], manual_loc["lon"]   # user-pinned spot
+    elif dlat is not None:
         wx_lat, wx_lon = dlat, dlon                      # dish sharing GPS (Mini on the road)
     elif HOME_DISH_ID and dish_id and dish_id != HOME_DISH_ID:
         wx_lat = wx_lon = None                           # positively roaming on a no-GPS dish
@@ -579,6 +584,7 @@ def build_context(conn, rows, days, now):
 
     ext_inputs = {
         "wx_lat": wx_lat, "wx_lon": wx_lon, "ah": ah, "ac": ac,
+        "loc_name": manual_loc["name"] if manual_loc else None,   # pinned label, if any
         "batt_present": batt_present,
         "soc_percent": soc_percent if batt_present else None,
         "charging_now": charging_now, "usable_wh": usable_wh,
@@ -819,9 +825,13 @@ def build_external(inp):
     else:
         weather_html = '<div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span class="pill gray">No location</span></span></div>'
 
-    # Location (reverse-geocoded dish GPS) as the Weather panel's first metric.
+    # Location as the Weather panel's first metric: the pinned name if the user
+    # chose one, else the reverse-geocoded point (dish GPS / home), else raw coords.
     place = ext["place"]
-    if place:
+    loc_name = inp.get("loc_name")
+    if loc_name:
+        loc_val = escape(loc_name)
+    elif place:
         loc_val = escape(place)
     elif wx_lat is not None:
         loc_val = f"{wx_lat:.2f}, {wx_lon:.2f}"

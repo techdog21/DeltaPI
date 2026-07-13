@@ -9,6 +9,38 @@ function encryptAndSubmit() {
         .catch(() => alert('Encryption error'));
 }
 
+// ---- Weather location picker (header dropdown) ----
+// The Mini won't always share GPS, so the user can pin a saved spot. Selecting
+// one POSTs the choice and re-fetches panels (the server rebuilds with the new
+// coords); picking "Add location…" prompts for name + lat/lon and reloads so
+// the dropdown lists the new, now-active spot.
+function setLocation(sel) {
+    var val = sel.value;
+    if (val === '__add__') { addLocation(); return; }
+    fetch('/set_location', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: val })
+    }).then(function(r) { if (!r.ok) throw new Error(); return r.json(); })
+      .then(function() { loadPanels(); })   // header keeps the new selection; panels rebuild
+      .catch(function() { alert('Could not set location'); location.reload(); });
+}
+
+function addLocation() {
+    var name = prompt('Location name:');
+    if (name === null || !name.trim()) { location.reload(); return; }  // cancelled -> restore dropdown
+    var lat = parseFloat(prompt('Latitude (decimal, e.g. 43.4451):'));
+    var lon = parseFloat(prompt('Longitude (decimal — WEST is negative, e.g. -116.5296):'));
+    if (isNaN(lat) || isNaN(lon)) { alert('Invalid coordinates'); location.reload(); return; }
+    fetch('/add_location', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim(), lat: lat, lon: lon })
+    }).then(function(r) { if (!r.ok) throw new Error(); return r.json(); })
+      .then(function() { location.reload(); })   // reload so the dropdown shows the new spot
+      .catch(function() { alert('Could not add location'); location.reload(); });
+}
+
 function toggleTheme() {
     var current = document.documentElement.getAttribute('data-theme') || 'dark';
     var next = current === 'dark' ? 'light' : 'dark';

@@ -42,7 +42,8 @@ from werkzeug.exceptions import HTTPException
 
 from config import POST_SECRET, fernet, MAX_DAYS, DB_DIR
 from util import server_log, decrypt_token
-from db import get_db, close_db, maybe_cleanup
+from db import (get_db, close_db, maybe_cleanup, list_locations, add_location,
+                get_setting, set_setting)
 from dashboard import build_context, build_external, placeholder_context
 from integrations import note_view, start_background_refresh
 
@@ -325,6 +326,14 @@ _page_cache_lock = threading.Lock()
 _page_refreshing = set()       # days values with a background re-render in flight
 
 
+def _invalidate_page_cache():
+    """Drop all cached panel renders so the next /panels rebuilds with current
+    inputs. Called after the weather location changes (baked into ext_inputs)."""
+    with _page_cache_lock:
+        _page_cache.clear()
+        _page_refreshing.clear()
+
+
 def _days_from_request():
     """Date range from the optional encrypted token (default 7 days)."""
     token = request.args.get("token")
@@ -377,7 +386,52 @@ def index():
     """
     if request.method == "HEAD":
         return "", 200
-    return render_template("index.html", **placeholder_context(_days_from_request()))
+    ctx = placeholder_context(_days_from_request())
+    # Header location dropdown: the saved spots plus the current selection. Read
+    # once at shell render (the header isn't part of the /panels swap).
+    conn = get_db()
+    ctx["locations"] = list_locations(conn)
+    ctx["active_loc_id"] = get_setting(conn, "active_location", "auto")
+    return render_template("index.html", **ctx)
+
+
+@app.route("/set_location", methods=["POST"])
+@limiter.limit("20 per minute")
+def set_location():
+    """Pin the active weather location from the header dropdown. Body: {"id": <id>|"auto"}.
+    'auto' returns to following dish GPS / the home fallback. Invalidates the panel
+    cache so the next render uses the new coordinates."""
+    payload = request.get_json(silent=True) or {}
+    sel = str(payload.get("id", "")).strip()
+    conn = get_db()
+    if sel != "auto":
+        if not sel.isdigit() or not conn.execute(
+                "SELECT 1 FROM locations WHERE id = ?", (sel,)).fetchone():
+            return jsonify({"error": "Unknown location"}), 400
+    set_setting(conn, "active_location", sel)
+    _invalidate_page_cache()
+    return jsonify({"status": "ok", "active": sel})
+
+
+@app.route("/add_location", methods=["POST"])
+@limiter.limit("10 per minute")
+def add_location_route():
+    """Add a saved weather location and make it active. Body: {"name","lat","lon"}.
+    West longitudes are negative. Invalidates the panel cache."""
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get("name", "")).strip()[:60]
+    try:
+        lat = float(payload["lat"])
+        lon = float(payload["lon"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "Invalid coordinates"}), 400
+    if not name or not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+        return jsonify({"error": "Invalid location"}), 400
+    conn = get_db()
+    loc_id = add_location(conn, name, lat, lon)
+    set_setting(conn, "active_location", str(loc_id))   # select the just-added spot
+    _invalidate_page_cache()
+    return jsonify({"status": "ok", "id": loc_id})
 
 
 @app.route("/panels")

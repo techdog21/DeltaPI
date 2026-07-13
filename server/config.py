@@ -50,6 +50,15 @@ def _env_float(name):
 HOME_LAT = _env_float("HOME_LAT")
 HOME_LON = _env_float("HOME_LON")
 HOME_DISH_ID = os.environ.get("HOME_DISH_ID")  # round home dish id -> use HOME_LAT/LON
+
+# Saved weather locations seeded into SQLite on a fresh DB. After that they're
+# editable from the dashboard header dropdown (stored in the `locations` table),
+# so this is only the initial set. Handy when the dish won't share GPS (e.g. the
+# Starlink Mini): pick your spot from the dropdown instead of relying on the
+# dish. West longitudes are negative. The first entry is selected on a fresh DB.
+SEED_LOCATIONS = [
+    {"name": "Grayback Gulch", "lat": 43.4451, "lon": -116.5296},
+]
 FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY")  # NASA FIRMS wildfire detections (free signup)
 SOLAR_KWP = _env_float("SOLAR_KWP")        # array peak kW for the solar forecast (e.g. 0.3 = 300 W)
 SOLAR_PR = _env_float("SOLAR_PR") or 0.75  # performance ratio (system losses) for the kWh estimate

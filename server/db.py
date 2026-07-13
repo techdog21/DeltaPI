@@ -11,7 +11,7 @@ import time as time_module
 from datetime import datetime, timedelta, timezone
 from flask import g
 
-from config import DB_PATH
+from config import DB_PATH, SEED_LOCATIONS
 from util import server_log
 
 
@@ -64,6 +64,33 @@ def init_db():
                 PRIMARY KEY (provider, loc_key)
             )
         """)
+        # Saved weather locations (header dropdown) + a tiny key/value settings
+        # store for the active selection. Lets the user pin a spot for the
+        # weather lookup when the dish (e.g. Starlink Mini) won't share GPS.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS locations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                lat REAL NOT NULL,
+                lon REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        # On a fresh DB, seed the saved locations and select the first one, so
+        # weather has a manual location to fall back on out of the box.
+        if not conn.execute("SELECT 1 FROM locations LIMIT 1").fetchone() and SEED_LOCATIONS:
+            for loc in SEED_LOCATIONS:
+                conn.execute("INSERT INTO locations (name, lat, lon) VALUES (?, ?, ?)",
+                             (loc["name"], loc["lat"], loc["lon"]))
+            first_id = conn.execute("SELECT id FROM locations ORDER BY id LIMIT 1").fetchone()[0]
+            if not conn.execute("SELECT 1 FROM app_settings WHERE key = 'active_location'").fetchone():
+                conn.execute("INSERT INTO app_settings (key, value) VALUES ('active_location', ?)",
+                             (str(first_id),))
         conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pi_status_timestamp ON pi_status (timestamp)")
         # Migrate: add any missing optional columns to pi_status
@@ -94,6 +121,50 @@ def close_db(exception):
     db = g.pop('db', None)
     if db is not None:
         db.close()
+
+
+# ------------------ Saved locations / settings ------------------ #
+def list_locations(conn):
+    """All saved weather locations (id, name, lat, lon), alphabetical."""
+    return conn.execute(
+        "SELECT id, name, lat, lon FROM locations ORDER BY name COLLATE NOCASE"
+    ).fetchall()
+
+
+def add_location(conn, name, lat, lon):
+    """Insert a saved location and return its new id (commits)."""
+    cur = conn.execute("INSERT INTO locations (name, lat, lon) VALUES (?, ?, ?)",
+                       (name, lat, lon))
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_setting(conn, key, default=None):
+    """Read a value from the key/value app_settings store."""
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_setting(conn, key, value):
+    """Upsert a value into the key/value app_settings store (commits)."""
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, str(value)))
+    conn.commit()
+
+
+def get_active_location(conn):
+    """The manually-pinned weather location as {'id','name','lat','lon'}, or None
+    when the selection is Auto (follow dish GPS / home fallback) or missing."""
+    sel = get_setting(conn, "active_location")
+    if not sel or sel == "auto":
+        return None
+    row = conn.execute("SELECT id, name, lat, lon FROM locations WHERE id = ?",
+                       (sel,)).fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "name": row[1], "lat": row[2], "lon": row[3]}
 
 
 def get_disk_status(path="/"):

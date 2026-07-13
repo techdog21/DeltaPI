@@ -35,6 +35,13 @@
             <input type="hidden" id="tokenInput" name="token">
             <button type="submit">Update</button>
         </form>
+        <select id="locSelect" class="theme-toggle" onchange="setLocation(this)" style="padding:4px 6px;">
+            <option value="auto" {% if active_loc_id|string == 'auto' %}selected{% endif %}>Location: Auto (GPS)</option>
+            {% for loc in locations %}
+            <option value="{{ loc['id'] }}" {% if active_loc_id|string == loc['id']|string %}selected{% endif %}>{{ loc['name'] }}</option>
+            {% endfor %}
+            <option value="__add__">➕ Add location…</option>
+        </select>
         <button class="theme-toggle" onclick="toggleTheme()">Theme</button>
         <button class="theme-toggle" onclick="location.reload()">Refresh</button>
         <select id="autoRefresh" class="theme-toggle" onchange="setAutoRefresh(this.value)" style="padding:4px 6px;">
