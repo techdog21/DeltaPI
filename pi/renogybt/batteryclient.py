@@ -42,7 +42,7 @@ class BatteryClient(BaseClient):
     def parse_battery_info(self, bs):
         data = {}
         data['function'] = FUNCTION.get(bytes_to_int(bs, 1, 1))
-        data['current'] = bytes_to_int(bs, 3, 2, True, scale = 0.01)
+        data['current'] = bytes_to_int(bs, 3, 2, True, scale = 0.1)   # Pro batteries report deci-amps; 0.01 under-read current (and power) 10x
         data['voltage'] = bytes_to_int(bs, 5, 2, scale = 0.1)
         data['remaining_charge'] = bytes_to_int(bs, 7, 4, scale = 0.001)
         data['capacity'] = bytes_to_int(bs, 11, 4, scale = 0.001)
