@@ -169,10 +169,11 @@ def list_locations(conn):
     ).fetchall()
 
 
-def add_location(conn, name, lat, lon):
-    """Insert a saved location (occupied by default) and return its new id (commits)."""
-    cur = conn.execute("INSERT INTO locations (name, lat, lon) VALUES (?, ?, ?)",
-                       (name, lat, lon))
+def add_location(conn, name, lat, lon, occupied=True):
+    """Insert a saved location (occupied = living in the RV there, default True)
+    and return its new id (commits)."""
+    cur = conn.execute("INSERT INTO locations (name, lat, lon, occupied) VALUES (?, ?, ?, ?)",
+                       (name, lat, lon, 1 if occupied else 0))
     conn.commit()
     return cur.lastrowid
 

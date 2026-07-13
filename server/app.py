@@ -449,10 +449,11 @@ def add_location_route():
         return jsonify({"error": "Invalid coordinates"}), 400
     if not name or not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
         return jsonify({"error": "Invalid location"}), 400
+    occupied = bool(payload.get("occupied", True))       # False = parked/home base
     conn = get_db()
-    loc_id = add_location(conn, name, lat, lon)          # new spots default to occupied
+    loc_id = add_location(conn, name, lat, lon, occupied)
     set_setting(conn, "active_location", str(loc_id))   # select the just-added spot
-    record_location_event(conn, loc_id, 1)              # timestamp this move for the outlook
+    record_location_event(conn, loc_id, 1 if occupied else 0)   # timestamp this move for the outlook
     _invalidate_page_cache()
     return jsonify({"status": "ok", "id": loc_id})
 

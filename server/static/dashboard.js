@@ -52,18 +52,46 @@ function adminPost(url, body, onOk) {
 
 function setLocation(sel) {
     var val = sel.value;
+    if (val === '__gps__') { useMyLocation(); return; }
     if (val === '__add__') { addLocation(); return; }
     adminPost('/set_location', { id: val }, function() { loadPanels(); });
+}
+
+// Ask whether the RV is lived-in (occupied) or parked here — drives whether the
+// spot's days count toward the Sustainability Outlook's usage average.
+function askOccupied() {
+    return confirm('Living in the RV here?\n\nOK = yes (counts toward usage)\nCancel = parked / home base');
+}
+
+function saveLocation(name, lat, lon) {
+    var occupied = askOccupied();
+    adminPost('/add_location', { name: name, lat: lat, lon: lon, occupied: occupied },
+              function() { location.reload(); });   // reload so the dropdown shows the new spot
+}
+
+// Pin the phone's current GPS in one tap (browser Geolocation; needs HTTPS —
+// the site is). Safari/Chrome prompt for permission the first time.
+function useMyLocation() {
+    if (!navigator.geolocation) { alert('This browser has no location support.'); location.reload(); return; }
+    navigator.geolocation.getCurrentPosition(function(pos) {
+        var lat = +pos.coords.latitude.toFixed(5);
+        var lon = +pos.coords.longitude.toFixed(5);
+        var name = prompt('Name this spot (' + lat + ', ' + lon + '):');
+        if (name === null || !name.trim()) { location.reload(); return; }
+        saveLocation(name.trim(), lat, lon);
+    }, function(err) {
+        alert('Could not get location: ' + err.message);
+        location.reload();
+    }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
 }
 
 function addLocation() {
     var name = prompt('Location name:');
     if (name === null || !name.trim()) { location.reload(); return; }  // cancelled -> restore dropdown
-    var lat = parseFloat(prompt('Latitude (decimal, e.g. 43.4451):'));
-    var lon = parseFloat(prompt('Longitude (decimal — WEST is negative, e.g. -116.5296):'));
+    var lat = parseFloat(prompt('Latitude (decimal, e.g. 43.8067):'));
+    var lon = parseFloat(prompt('Longitude (decimal — WEST is negative, e.g. -115.8688):'));
     if (isNaN(lat) || isNaN(lon)) { alert('Invalid coordinates'); location.reload(); return; }
-    adminPost('/add_location', { name: name.trim(), lat: lat, lon: lon },
-              function() { location.reload(); });   // reload so the dropdown shows the new spot
+    saveLocation(name.trim(), lat, lon);
 }
 
 function toggleTheme() {

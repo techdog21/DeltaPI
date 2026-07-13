@@ -40,6 +40,7 @@
             {% for loc in locations %}
             <option value="{{ loc['id'] }}" {% if active_loc_id|string == loc['id']|string %}selected{% endif %}>{{ loc['name'] }}{% if not loc['occupied'] %} · parked{% endif %}</option>
             {% endfor %}
+            <option value="__gps__">📍 Use my location</option>
             <option value="__add__">➕ Add location…</option>
         </select>
         <button class="theme-toggle" onclick="toggleTheme()">Theme</button>

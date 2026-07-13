@@ -361,7 +361,13 @@ def build_context(conn, rows, days, now):
             house_load_w = None
             house_load_str = "— (Charging, Generator)"
         else:
-            house_load_w = max(0, mppt_out_w - (battery.get("power") or 0))  # true house load
+            # Solar is sampled fast (serial) but the battery is a ~60s BLE poll, so
+            # the instantaneous MPPT-minus-battery load jitters. Average the
+            # per-frame house load over the most recent frames (~3 min, spanning a
+            # few poll cycles) for a steady number instead of the noisy latest one.
+            recent_house = [b[2] for b in batt_series[:12]]   # batt_series is newest-first
+            house_load_w = (sum(recent_house) / len(recent_house)) if recent_house \
+                else max(0, mppt_out_w - (battery.get("power") or 0))
             house_load_a = house_load_w / v if v else 0
             house_load_str = f"{house_load_w:.0f} W ({house_load_a:.1f} A)"
         # Net charge actually reaching the pack = solar/charger in minus house load
