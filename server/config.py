@@ -59,13 +59,18 @@ HOME_LAT = _env_float("HOME_LAT")
 HOME_LON = _env_float("HOME_LON")
 HOME_DISH_ID = os.environ.get("HOME_DISH_ID")  # round home dish id -> use HOME_LAT/LON
 
-# Saved weather locations seeded into SQLite on a fresh DB. After that they're
-# editable from the dashboard header dropdown (stored in the `locations` table),
-# so this is only the initial set. Handy when the dish won't share GPS (e.g. the
-# Starlink Mini): pick your spot from the dropdown instead of relying on the
+# Saved weather locations seeded into SQLite (missing ones are added on startup
+# by name, so new entries here reach existing DBs too). After seeding they're
+# editable from the dashboard header dropdown. Handy when the dish won't share
+# GPS (e.g. the Starlink Mini): pick your spot from the dropdown instead of the
 # dish. West longitudes are negative. The first entry is selected on a fresh DB.
+#
+# `occupied` = whether living in the RV there. Parked spots (home base) are
+# occupied=False so their low-usage days are excluded from the Sustainability
+# Outlook's harvest-vs-consumption average — only lived-in days count.
 SEED_LOCATIONS = [
-    {"name": "Grayback Gulch", "lat": 43.80673, "lon": -115.868826},  # Boise NF, past Idaho City
+    {"name": "Grayback Gulch", "lat": 43.80673, "lon": -115.868826, "occupied": True},   # Boise NF, past Idaho City
+    {"name": "Melba (home)", "lat": 43.4451, "lon": -116.5296, "occupied": False},       # home base / parking lot
 ]
 FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY")  # NASA FIRMS wildfire detections (free signup)
 SOLAR_KWP = _env_float("SOLAR_KWP")        # array peak kW for the solar forecast (e.g. 0.3 = 300 W)

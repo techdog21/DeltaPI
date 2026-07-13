@@ -43,7 +43,7 @@ from werkzeug.exceptions import HTTPException
 from config import POST_SECRET, ADMIN_SECRET, fernet, MAX_DAYS, DB_DIR
 from util import server_log, decrypt_token
 from db import (get_db, close_db, maybe_cleanup, list_locations, add_location,
-                get_setting, set_setting)
+                get_setting, set_setting, record_location_event)
 from dashboard import build_context, build_external, placeholder_context
 from integrations import note_view, start_background_refresh
 
@@ -418,11 +418,15 @@ def set_location():
     payload = request.get_json(silent=True) or {}
     sel = str(payload.get("id", "")).strip()
     conn = get_db()
-    if sel != "auto":
-        if not sel.isdigit() or not conn.execute(
-                "SELECT 1 FROM locations WHERE id = ?", (sel,)).fetchone():
+    if sel == "auto":
+        loc_id, occupied = None, 0            # home fallback counts as parked
+    else:
+        row = conn.execute("SELECT id, occupied FROM locations WHERE id = ?", (sel,)).fetchone()
+        if not sel.isdigit() or not row:
             return jsonify({"error": "Unknown location"}), 400
+        loc_id, occupied = row[0], row[1]
     set_setting(conn, "active_location", sel)
+    record_location_event(conn, loc_id, occupied)   # timestamp this move for the outlook
     _invalidate_page_cache()
     return jsonify({"status": "ok", "active": sel})
 
@@ -446,8 +450,9 @@ def add_location_route():
     if not name or not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
         return jsonify({"error": "Invalid location"}), 400
     conn = get_db()
-    loc_id = add_location(conn, name, lat, lon)
+    loc_id = add_location(conn, name, lat, lon)          # new spots default to occupied
     set_setting(conn, "active_location", str(loc_id))   # select the just-added spot
+    record_location_event(conn, loc_id, 1)              # timestamp this move for the outlook
     _invalidate_page_cache()
     return jsonify({"status": "ok", "id": loc_id})
 

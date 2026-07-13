@@ -21,12 +21,12 @@ from config import (MAX_DAYS, BATTERY_CAPACITY_WH, SOC_FLOOR, DB_DIR,
                     HOME_LAT, HOME_LON, HOME_DISH_ID, SOLAR_KWP, SOLAR_PR,
                     CS_MAP, ERR_MAP, WMO_CODES, AQI_BANDS, SEVERITY_RANK, FLOOD_LABELS)
 from util import (server_log, humanize_minutes, clean_int, ensure_utc, fmt_mt,
-                  fmt_clock, make_status_pill, fmt_runtime, _avg_complete_days, moon_phase)
+                  fmt_clock, make_status_pill, fmt_runtime, _avg_occupied_days, moon_phase)
 from energy import (estimate_soc, soc_pill, sustainability_outlook,
                     estimate_avg_load_w, build_voltage_series, _sl_up)
 from integrations import (get_weather, get_air_quality, get_nws_alerts, get_place,
                           get_wildfires, get_quake, get_aurora, get_river)
-from db import get_disk_status, get_active_location
+from db import get_disk_status, get_active_location, occupied_day_set
 
 # One point per chart pixel is plenty: at one frame per ~15 s a 7-day window is
 # ~40k rows, and shipping them all makes the chart data island multi-MB and the
@@ -552,8 +552,11 @@ def build_context(conn, rows, days, now):
     # Sustainability Outlook (Solar panel): fuse measured daily harvest vs
     # consumption, the current charge state, and the solar forecast into one
     # forward-looking state (Self-sufficient / Sustaining / Drawing down / Critical).
-    ah = _avg_complete_days(h20_values)    # avg recent daily harvest (kWh)
-    ac = _avg_complete_days(cons_values)   # avg recent daily consumption (kWh)
+    # Only count days the RV was lived-in (occupied), so parked/parking-lot days
+    # with near-zero usage don't skew the harvest-vs-consumption balance.
+    occ_days = occupied_day_set(conn, sorted(set(h20_days) | set(cons_days)))
+    ah = _avg_occupied_days(h20_days, h20_values, occ_days)    # avg lived-in daily harvest (kWh)
+    ac = _avg_occupied_days(cons_days, cons_values, occ_days)  # avg lived-in daily consumption (kWh)
     net_w = battery.get("power") if batt_present else None   # + = charging
     charging_now = bool(is_charging) or (net_w is not None and net_w >= 0)
 

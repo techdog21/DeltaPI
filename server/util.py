@@ -107,6 +107,19 @@ def _avg_complete_days(values, n=7):
     return sum(vals) / len(vals) if vals else None
 
 
+def _avg_occupied_days(days, values, occupied, n=7):
+    """Average of recent COMPLETE, occupied days (living in the RV), dropping the
+    most recent (still-partial) day, over up to n such days. `days` are ISO date
+    strings parallel to `values`; `occupied` is the set of those dates that count.
+    None when there's no lived-in history yet — the outlook then falls back to the
+    instantaneous signal instead of averaging in parked/parking-lot days."""
+    if not days or len(days) < 2:
+        return None
+    pairs = list(zip(days, values))[:-1]                    # drop today's partial day
+    vals = [v for d, v in pairs if d in occupied][-n:]      # keep only lived-in days
+    return sum(vals) / len(vals) if vals else None
+
+
 def decrypt_token(token, min_days=1, max_days=MAX_DAYS):
     """
     Decrypts a Fernet token and returns the encoded number of days.

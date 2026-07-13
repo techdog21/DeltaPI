@@ -67,12 +67,14 @@ def init_db():
         # Saved weather locations (header dropdown) + a tiny key/value settings
         # store for the active selection. Lets the user pin a spot for the
         # weather lookup when the dish (e.g. Starlink Mini) won't share GPS.
+        # `occupied` marks whether living in the RV there (vs. parked at home).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS locations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 lat REAL NOT NULL,
-                lon REAL NOT NULL
+                lon REAL NOT NULL,
+                occupied INTEGER NOT NULL DEFAULT 1
             )
         """)
         conn.execute("""
@@ -81,16 +83,34 @@ def init_db():
                 value TEXT
             )
         """)
-        # On a fresh DB, seed the saved locations and select the first one, so
-        # weather has a manual location to fall back on out of the box.
-        if not conn.execute("SELECT 1 FROM locations LIMIT 1").fetchone() and SEED_LOCATIONS:
-            for loc in SEED_LOCATIONS:
-                conn.execute("INSERT INTO locations (name, lat, lon) VALUES (?, ?, ?)",
-                             (loc["name"], loc["lat"], loc["lon"]))
-            first_id = conn.execute("SELECT id FROM locations ORDER BY id LIMIT 1").fetchone()[0]
-            if not conn.execute("SELECT 1 FROM app_settings WHERE key = 'active_location'").fetchone():
+        # Append-only log of when each location became active. Lets the
+        # Sustainability Outlook classify each past day as lived-in vs parked,
+        # so parking-lot days are kept out of the harvest-vs-consumption average.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS location_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                epoch REAL NOT NULL,
+                location_id INTEGER,
+                occupied INTEGER NOT NULL
+            )
+        """)
+        # Migrate: add `occupied` to a locations table created before it existed.
+        loc_cols = {row[1] for row in conn.execute("PRAGMA table_info(locations)").fetchall()}
+        if "occupied" not in loc_cols:
+            conn.execute("ALTER TABLE locations ADD COLUMN occupied INTEGER NOT NULL DEFAULT 1")
+        # Seed any missing saved locations by name (so new SEED_LOCATIONS entries
+        # reach existing DBs too), then select the first one if nothing is picked.
+        for loc in SEED_LOCATIONS:
+            if not conn.execute("SELECT 1 FROM locations WHERE name = ?", (loc["name"],)).fetchone():
+                conn.execute("INSERT INTO locations (name, lat, lon, occupied) VALUES (?, ?, ?, ?)",
+                             (loc["name"], loc["lat"], loc["lon"], 1 if loc.get("occupied", True) else 0))
+        if SEED_LOCATIONS and not conn.execute(
+                "SELECT 1 FROM app_settings WHERE key = 'active_location'").fetchone():
+            first = conn.execute("SELECT id FROM locations WHERE name = ? LIMIT 1",
+                                 (SEED_LOCATIONS[0]["name"],)).fetchone()
+            if first:
                 conn.execute("INSERT INTO app_settings (key, value) VALUES ('active_location', ?)",
-                             (str(first_id),))
+                             (str(first[0]),))
         # One-time correction: the first Grayback Gulch seed shipped with Melba's
         # coordinates by mistake (the real spot is up past Idaho City in the Boise
         # NF). Fix any DB still carrying the wrong point; a user-edited row won't
@@ -99,6 +119,16 @@ def init_db():
             "UPDATE locations SET lat = ?, lon = ? "
             "WHERE name = 'Grayback Gulch' AND lat = 43.4451 AND lon = -116.5296",
             (43.80673, -115.868826))
+        # Backfill an initial occupancy event for the current selection when the
+        # log is empty (covers DBs seeded before location_events existed), so the
+        # outlook knows the RV is occupied from now on rather than not at all.
+        if not conn.execute("SELECT 1 FROM location_events LIMIT 1").fetchone():
+            sel = conn.execute("SELECT value FROM app_settings WHERE key = 'active_location'").fetchone()
+            if sel and sel[0] not in (None, "", "auto"):
+                row = conn.execute("SELECT id, occupied FROM locations WHERE id = ?", (sel[0],)).fetchone()
+                if row:
+                    conn.execute("INSERT INTO location_events (epoch, location_id, occupied) VALUES (?, ?, ?)",
+                                 (time_module.time(), row[0], row[1]))
         conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pi_status_timestamp ON pi_status (timestamp)")
         # Migrate: add any missing optional columns to pi_status
@@ -133,18 +163,54 @@ def close_db(exception):
 
 # ------------------ Saved locations / settings ------------------ #
 def list_locations(conn):
-    """All saved weather locations (id, name, lat, lon), alphabetical."""
+    """All saved weather locations (id, name, lat, lon, occupied), alphabetical."""
     return conn.execute(
-        "SELECT id, name, lat, lon FROM locations ORDER BY name COLLATE NOCASE"
+        "SELECT id, name, lat, lon, occupied FROM locations ORDER BY name COLLATE NOCASE"
     ).fetchall()
 
 
 def add_location(conn, name, lat, lon):
-    """Insert a saved location and return its new id (commits)."""
+    """Insert a saved location (occupied by default) and return its new id (commits)."""
     cur = conn.execute("INSERT INTO locations (name, lat, lon) VALUES (?, ?, ?)",
                        (name, lat, lon))
     conn.commit()
     return cur.lastrowid
+
+
+def record_location_event(conn, location_id, occupied):
+    """Append an occupancy event (called whenever the active location changes) so
+    the Sustainability Outlook can tell which days the RV was lived-in vs parked."""
+    conn.execute("INSERT INTO location_events (epoch, location_id, occupied) VALUES (?, ?, ?)",
+                 (time_module.time(), location_id, 1 if occupied else 0))
+    conn.commit()
+
+
+def occupied_day_set(conn, day_strings):
+    """Subset of the given ISO date strings (UTC day keys) the RV was 'occupied'
+    (living in it), per the location-change log: a day counts if the location
+    active at the end of that day was occupied. Days before the first event —
+    including all pre-picker history — are treated as parked and excluded."""
+    events = conn.execute(
+        "SELECT epoch, occupied FROM location_events ORDER BY epoch"
+    ).fetchall()
+    if not events or not day_strings:
+        return set()
+    occ = set()
+    for d in day_strings:
+        try:
+            end_epoch = (datetime.fromisoformat(d).replace(tzinfo=timezone.utc)
+                         + timedelta(days=1)).timestamp()
+        except Exception:
+            continue
+        state = 0
+        for ep, o in events:            # events are epoch-ascending
+            if ep <= end_epoch:
+                state = o
+            else:
+                break
+        if state:
+            occ.add(d)
+    return occ
 
 
 def get_setting(conn, key, default=None):
