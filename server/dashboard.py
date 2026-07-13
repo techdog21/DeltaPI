@@ -356,11 +356,26 @@ def build_context(conn, rows, days, now):
         house_load_a = house_load_w / v if v else 0
         house_load_str = f"{house_load_w:.0f} W ({house_load_a:.1f} A)"
         runtime_str = fmt_runtime(house_load_w, usable_wh)
+        # Net charge actually reaching the pack = solar/charger in minus house load
+        # (BMS net power). At a near-covered load only a trickle goes to the battery,
+        # which is why "Time to full" can be long even with the sun out.
+        net_charge_w = battery.get("power") or 0     # + into battery
+        net_charge_a = battery.get("current") or 0
+        if net_charge_w >= 5:
+            net_charge_str = f"+{net_charge_w:.0f} W (+{net_charge_a:.1f} A)"
+            net_charge_class, net_charge_label = "green", "Into battery"
+        elif net_charge_w <= -5:
+            net_charge_str = f"{net_charge_w:.0f} W ({net_charge_a:.1f} A)"
+            net_charge_class, net_charge_label = "yellow", "From battery"
+        else:
+            net_charge_str = f"{net_charge_w:+.0f} W"
+            net_charge_class, net_charge_label = "gray", "Balanced"
     else:
         avg_load_w = estimate_avg_load_w(conn, now) if parsed else None
         usable_wh = BATTERY_CAPACITY_WH * max(0, soc_percent - SOC_FLOOR) / 100 if parsed else 0
         house_load_str = f"~{avg_load_w:.0f} W est" if avg_load_w else "—"
         runtime_str = fmt_runtime(avg_load_w, usable_wh, " est") if avg_load_w else "N/A"
+        net_charge_str, net_charge_class, net_charge_label = "—", "gray", "—"
 
     # Current solar power (latest panel watts) for the Solar System panel
     solar_now = parsed[0][3] if parsed else 0
@@ -444,10 +459,13 @@ def build_context(conn, rows, days, now):
             ttf_str = "Full"
         elif cur <= 0.2:
             ttf_str = "—"                       # not meaningfully charging (idle / discharging)
-        elif soc_percent and soc_percent >= 90:
-            ttf_str = "Topping off"             # absorption/float taper -> linear estimate is unreliable
         elif cap > rem:
-            ttf_str = humanize_minutes((cap - rem) / cur * 60)  # bulk stage: ~constant current, linear is fair
+            # Estimate off the NET current actually entering the pack (charge minus
+            # load), so a load that's eating most of the solar shows as a long fill
+            # instead of a bogus "topping off". Above ~90% the charger tapers, so
+            # the linear number is an upper bound — usually finishes sooner.
+            est = humanize_minutes((cap - rem) / cur * 60)
+            ttf_str = f"~{est} (tapering)" if soc_percent and soc_percent >= 90 else est
 
     # ---- Starlink connectivity (dish status via starlink_poll, merged by logger) ----
     starlink = None
@@ -698,6 +716,7 @@ def build_context(conn, rows, days, now):
         "batt_temp_str": batt_temp_str, "btemp_class": btemp_class, "btemp_label": btemp_label,
         "cell_class": cell_class, "cell_label": cell_label,
         "house_load_str": house_load_str, "runtime_str": runtime_str, "ttf_str": ttf_str,
+        "net_charge_str": net_charge_str, "net_charge_class": net_charge_class, "net_charge_label": net_charge_label,
         # solar panel
         "status_color": status_color, "status_text": status_text,
         "ctrl_class": ctrl_class, "ctrl_label": ctrl_label,
@@ -1049,6 +1068,7 @@ def placeholder_context(days):
         "batt_temp_str": "—", "btemp_class": pc, "btemp_label": pl,
         "cell_class": pc, "cell_label": pl,
         "house_load_str": "—", "runtime_str": "—", "ttf_str": "—",
+        "net_charge_str": "—", "net_charge_class": pc, "net_charge_label": pl,
         # solar panel
         "status_color": pc, "status_text": "Loading…",
         "ctrl_class": pc, "ctrl_label": pl, "mode_class": pc, "mode_label": pl,
