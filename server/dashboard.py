@@ -352,9 +352,18 @@ def build_context(conn, rows, days, now):
         usable_wh = max(0, ((battery.get("remaining_ah") or 0)
                             - (battery.get("capacity_ah") or 0) * SOC_FLOOR / 100) * v)
         mppt_out_w = voltages[0] * currents[0] if parsed else 0
-        house_load_w = max(0, mppt_out_w - (battery.get("power") or 0))  # true house load
-        house_load_a = house_load_w / v if v else 0
-        house_load_str = f"{house_load_w:.0f} W ({house_load_a:.1f} A)"
+        # A second charge source (generator/shore) shows up as the pack charging
+        # faster than solar alone can supply. That input is un-metered, so we can't
+        # isolate DC house load while it's running — flag it instead of faking a 0.
+        external_w = (battery.get("power") or 0) - mppt_out_w
+        on_external = external_w > max(25.0, 0.15 * mppt_out_w)
+        if on_external:
+            house_load_w = None
+            house_load_str = "— (Charging, Generator)"
+        else:
+            house_load_w = max(0, mppt_out_w - (battery.get("power") or 0))  # true house load
+            house_load_a = house_load_w / v if v else 0
+            house_load_str = f"{house_load_w:.0f} W ({house_load_a:.1f} A)"
         # Net charge actually reaching the pack = solar/charger in minus house load
         # (BMS net power). At a near-covered load only a trickle goes to the battery,
         # which is why "Time to full" can be long even with the sun out.
@@ -591,9 +600,10 @@ def build_context(conn, rows, days, now):
     # mere connection — and can't tell shore from a generator.
     ps_class, ps_label = "gray", "—"
     if batt_present and net_w is not None:
-        solar_to_batt_w = (voltages[0] * currents[0]) if parsed else 0   # MPPT output to battery (W)
-        if net_w - solar_to_batt_w > max(25.0, 0.15 * solar_to_batt_w):
-            ps_class, ps_label = "gray", "Shore / Generator"
+        if on_external:
+            # Charging from an external AC source (generator/shore); surface the
+            # extra input so it's obvious the rig is on generator, not solar.
+            ps_class, ps_label = "yellow", f"Generator / Shore (+{external_w:.0f} W)"
         else:
             ps_class, ps_label = "green", "Solar / Battery"
 
