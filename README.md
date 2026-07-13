@@ -131,6 +131,7 @@ until there's enough daily history to judge.
 |---|---|---|---|
 | `POST_SECRET` | Server + Pi | Yes | Bearer token authenticating POST requests |
 | `FERNET_KEY` | Server | Yes | Fernet key for date-range tokens |
+| `ADMIN_SECRET` | Server | No | Secret gating the dashboard's location-editing routes (`/set_location`, `/add_location`); the browser prompts for it and sends it as `X-Admin-Secret`. Unset ⇒ location editing is disabled (fails closed). |
 | `BASE_URL` | Pi | Yes | Server URL the logger uploads to |
 | `DB_DIR` | Server | No | DB/log dir (default `/data`) |
 | `HOME_LAT` / `HOME_LON` | Server | No | Home weather location (decimal degrees) used when the dish isn't sharing GPS. Kept out of the repo for privacy. |

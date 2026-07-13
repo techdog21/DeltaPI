@@ -14,16 +14,46 @@ function encryptAndSubmit() {
 // one POSTs the choice and re-fetches panels (the server rebuilds with the new
 // coords); picking "Add location…" prompts for name + lat/lon and reloads so
 // the dropdown lists the new, now-active spot.
+//
+// The write routes require an admin secret (server env ADMIN_SECRET) so not just
+// anyone with the URL can change the location. We cache it in localStorage and
+// prompt for it the first time; a 401 means it's wrong, so we clear and re-ask.
+
+function adminSecret(forcePrompt) {
+    var s = forcePrompt ? null : localStorage.getItem('adminSecret');
+    if (!s) {
+        s = prompt('Enter the admin secret to edit locations:');
+        if (s) localStorage.setItem('adminSecret', s);
+    }
+    return s;
+}
+
+function adminPost(url, body, onOk) {
+    var secret = adminSecret(false);
+    if (!secret) { location.reload(); return; }   // cancelled -> restore dropdown
+    fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': secret },
+        body: JSON.stringify(body)
+    }).then(function(r) {
+        if (r.status === 401) {                    // wrong/missing secret
+            localStorage.removeItem('adminSecret');
+            throw new Error('unauthorized');
+        }
+        if (!r.ok) throw new Error('failed');
+        return r.json();
+    }).then(onOk)
+      .catch(function(e) {
+        alert(e.message === 'unauthorized'
+            ? 'Wrong admin secret — try again.' : 'Request failed.');
+        location.reload();
+    });
+}
+
 function setLocation(sel) {
     var val = sel.value;
     if (val === '__add__') { addLocation(); return; }
-    fetch('/set_location', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: val })
-    }).then(function(r) { if (!r.ok) throw new Error(); return r.json(); })
-      .then(function() { loadPanels(); })   // header keeps the new selection; panels rebuild
-      .catch(function() { alert('Could not set location'); location.reload(); });
+    adminPost('/set_location', { id: val }, function() { loadPanels(); });
 }
 
 function addLocation() {
@@ -32,13 +62,8 @@ function addLocation() {
     var lat = parseFloat(prompt('Latitude (decimal, e.g. 43.4451):'));
     var lon = parseFloat(prompt('Longitude (decimal — WEST is negative, e.g. -116.5296):'));
     if (isNaN(lat) || isNaN(lon)) { alert('Invalid coordinates'); location.reload(); return; }
-    fetch('/add_location', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), lat: lat, lon: lon })
-    }).then(function(r) { if (!r.ok) throw new Error(); return r.json(); })
-      .then(function() { location.reload(); })   // reload so the dropdown shows the new spot
-      .catch(function() { alert('Could not add location'); location.reload(); });
+    adminPost('/add_location', { name: name.trim(), lat: lat, lon: lon },
+              function() { location.reload(); });   // reload so the dropdown shows the new spot
 }
 
 function toggleTheme() {

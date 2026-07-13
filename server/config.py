@@ -21,6 +21,14 @@ POST_SECRET = os.environ.get("POST_SECRET")
 if not POST_SECRET:
     logging.warning("POST_SECRET is not set — all authenticated routes will reject requests")
 
+# Separate secret for the dashboard's write actions (saving/selecting weather
+# locations). Kept distinct from POST_SECRET on purpose: the browser holds this
+# one, so leaking it can only change a location — never forge data ingestion.
+# Fails closed: if unset, the /set_location and /add_location routes are disabled.
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET")
+if not ADMIN_SECRET:
+    logging.warning("ADMIN_SECRET is not set — dashboard location editing is disabled")
+
 FERNET_KEY = os.environ.get("FERNET_KEY")
 if not FERNET_KEY:
     logging.warning("FERNET_KEY is not set — /encrypt_days will be unavailable")

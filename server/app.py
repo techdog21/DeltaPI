@@ -40,7 +40,7 @@ from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.exceptions import HTTPException
 
-from config import POST_SECRET, fernet, MAX_DAYS, DB_DIR
+from config import POST_SECRET, ADMIN_SECRET, fernet, MAX_DAYS, DB_DIR
 from util import server_log, decrypt_token
 from db import (get_db, close_db, maybe_cleanup, list_locations, add_location,
                 get_setting, set_setting)
@@ -79,6 +79,16 @@ def is_authorized():
     expected = f"Bearer {POST_SECRET}"
     provided = request.headers.get("Authorization", "")
     return hmac.compare_digest(provided, expected)
+
+
+def is_admin():
+    """Constant-time check of the X-Admin-Secret header against ADMIN_SECRET, for
+    the dashboard's write actions. Returns False if ADMIN_SECRET is not configured
+    (fail closed), so location editing stays disabled until a secret is set."""
+    if not ADMIN_SECRET:
+        return False
+    provided = request.headers.get("X-Admin-Secret", "")
+    return hmac.compare_digest(provided, ADMIN_SECRET)
 
 
 # ------------------ Ingestion routes ------------------ #
@@ -400,7 +410,11 @@ def index():
 def set_location():
     """Pin the active weather location from the header dropdown. Body: {"id": <id>|"auto"}.
     'auto' returns to following dish GPS / the home fallback. Invalidates the panel
-    cache so the next render uses the new coordinates."""
+    cache so the next render uses the new coordinates. Requires the admin secret."""
+    if not request.is_secure:
+        return jsonify({"error": "HTTPS required"}), 403
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
     payload = request.get_json(silent=True) or {}
     sel = str(payload.get("id", "")).strip()
     conn = get_db()
@@ -417,7 +431,11 @@ def set_location():
 @limiter.limit("10 per minute")
 def add_location_route():
     """Add a saved weather location and make it active. Body: {"name","lat","lon"}.
-    West longitudes are negative. Invalidates the panel cache."""
+    West longitudes are negative. Invalidates the panel cache. Requires the admin secret."""
+    if not request.is_secure:
+        return jsonify({"error": "HTTPS required"}), 403
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
     payload = request.get_json(silent=True) or {}
     name = str(payload.get("name", "")).strip()[:60]
     try:

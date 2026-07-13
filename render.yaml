@@ -18,5 +18,7 @@ services:
         sync: false           # set at deploy time; never stored in the repo
       - key: FERNET_KEY       # key for date-range tokens
         sync: false
+      - key: ADMIN_SECRET     # gates the dashboard's location-editing routes
+        sync: false           # set at deploy time; never stored in the repo
     # Optional env vars (HOME_LAT/LON, HOME_DISH_ID, FIRMS_MAP_KEY, SOLAR_KWP/PR)
     # are documented in the README — add them here or in the dashboard as needed.
