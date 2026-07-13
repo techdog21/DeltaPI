@@ -401,6 +401,11 @@ def build_context(conn, rows, days, now):
         (5, ("gray", "Off")), (50, ("green", "Low")),
         (150, ("green", "Good")), (float('inf'), ("green", "Strong")),
     ])
+    # When the battery is full, the MPPT throttles to ~0 even in bright sun —
+    # there's nothing left to absorb. With daylight on the panels (VPV up) that's
+    # "Full — idle", not "Off"/"Low", so healthy idle solar doesn't read as a failure.
+    if solar_now < 50 and latest_vpv >= 5 and soc_percent is not None and soc_percent >= 99:
+        solar_class, solar_label = "green", "Full — idle"
 
     # Charge mode (CS) — green while charging, red on fault, gray when idle/off
     if parsed:
