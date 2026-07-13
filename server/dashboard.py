@@ -355,12 +355,18 @@ def build_context(conn, rows, days, now):
         house_load_w = max(0, mppt_out_w - (battery.get("power") or 0))  # true house load
         house_load_a = house_load_w / v if v else 0
         house_load_str = f"{house_load_w:.0f} W ({house_load_a:.1f} A)"
-        runtime_str = fmt_runtime(house_load_w, usable_wh)
         # Net charge actually reaching the pack = solar/charger in minus house load
         # (BMS net power). At a near-covered load only a trickle goes to the battery,
         # which is why "Time to full" can be long even with the sun out.
         net_charge_w = battery.get("power") or 0     # + into battery
         net_charge_a = battery.get("current") or 0
+        # Runtime is what the pack itself is draining — the NET draw, not the full
+        # house load. While solar covers (or exceeds) the load the battery isn't
+        # discharging, so there's no runtime to count down.
+        if net_charge_w < -0.5:
+            runtime_str = fmt_runtime(-net_charge_w, usable_wh)   # actual draw from the pack
+        else:
+            runtime_str = "Charging" if net_charge_w >= 5 else "Not draining"
         if net_charge_w >= 5:
             net_charge_str = f"+{net_charge_w:.0f} W (+{net_charge_a:.1f} A)"
             net_charge_class, net_charge_label = "green", "Into battery"
