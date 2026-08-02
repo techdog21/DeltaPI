@@ -45,15 +45,25 @@ import RPi.GPIO as GPIO
 
 #  ------------------ Configuration ------------------ #
 FAN_PIN = 18       # GPIO18 (physical pin 12)
-ON_TEMP = 50       # °C (122°F) full speed at 50°C
-OFF_TEMP = 30      # °C (77°F) fan off below 30°C
+ON_TEMP = 80       # °C (176°F) full speed at 80°C — the SoC's soft-throttle point, so
+                   # the fan is flat out exactly when the clock would start dropping
+OFF_TEMP = 60      # °C (140°F) fan off below 60°C. Deliberately well above idle: a
+                   # Zero 2 W measures ~35°C on the bench and stays clear of 60°C even
+                   # in a hot enclosure, and it doesn't throttle until ON_TEMP. Cooling
+                   # below this buys no clock speed — only fan wear, noise and battery
+                   # draw on a solar system. Earlier values (30/50) sat *below* idle,
+                   # which parked the controller in its transition band and cycled the
+                   # fan 0->32%->0 every ~10 min for a ~2°C gain against an 80°C limit.
 PWM_FREQ = 25000   # 25 kHz for silent PWM
 FAN_MIN_DUTY = 20  # Minimum speed to reliably spin fan
 FAN_DUTY_DEADBAND = 10  # ignore sub-10% duty changes so the fan doesn't hunt (and
                         # flood the log) on a ~1-2°C temp wiggle mid-ramp
-FAN_HYST = 3       # °C hysteresis at the on/off threshold: once the fan is off it
+FAN_HYST = 5       # °C hysteresis at the on/off threshold: once the fan is off it
                    # stays off until temp climbs FAN_HYST above OFF_TEMP, so idling
                    # right at OFF_TEMP doesn't toggle 0%<->min-duty
+RAMP_START = OFF_TEMP + FAN_HYST  # °C at which the fan is first allowed to spin. Also
+                   # the low anchor of the duty ramp, so turn-on lands exactly on
+                   # FAN_MIN_DUTY instead of jumping partway up the curve.
 
 # Log file paths
 LOG_PATH = "/var/log/vedirect/solar_log.jsonl"
@@ -151,14 +161,21 @@ def update_fan(pwm, temp, current_duty):
         return current_duty
     if temp <= OFF_TEMP:
         new_duty = 0  # Fan fully off
-    elif current_duty == 0 and temp < OFF_TEMP + FAN_HYST:
+    elif current_duty == 0 and temp < RAMP_START:
         new_duty = 0  # hysteresis band: stay off until temp climbs clear of OFF_TEMP
     elif temp >= ON_TEMP:
         new_duty = 100  # Full speed
     else:
-        # Smooth ramp from FAN_MIN_DUTY to 100% between OFF_TEMP and ON_TEMP
-        slope = (100 - FAN_MIN_DUTY) / (ON_TEMP - OFF_TEMP)
-        new_duty = int(FAN_MIN_DUTY + slope * (temp - OFF_TEMP))
+        # Smooth ramp from FAN_MIN_DUTY to 100% between RAMP_START and ON_TEMP.
+        # Anchoring the low end at RAMP_START rather than OFF_TEMP is what makes
+        # turn-on land on FAN_MIN_DUTY: hysteresis holds the fan off until RAMP_START,
+        # so a ramp anchored at OFF_TEMP is already FAN_HYST worth of slope above the
+        # floor by the time the fan is allowed to spin, and it snaps straight there.
+        # The clamp covers the descending case — fan running, temp back inside the
+        # hysteresis band — where the ramp would otherwise fall under the floor and
+        # stall the fan while still driving it.
+        slope = (100 - FAN_MIN_DUTY) / (ON_TEMP - RAMP_START)
+        new_duty = max(FAN_MIN_DUTY, int(FAN_MIN_DUTY + slope * (temp - RAMP_START)))
 
     # Deadband: only act when the target duty differs from the current by a
     # meaningful amount, so a ~1-2°C temp wiggle mid-ramp doesn't make the fan
