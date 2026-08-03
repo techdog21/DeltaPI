@@ -231,8 +231,18 @@ def build_context(conn, rows, days, now):
 
     try:
         duty_value = int(pi_status_row.get("fan_speed", "0%").replace("%", "").strip())
+        # Colours track CPU temperature, not "how hard the fan works". The Pi's curve
+        # (pi/vedirect_logger.py) ramps FAN_MIN_DUTY->100% across RAMP_START->ON_TEMP,
+        # so duty maps back to temp as T = 65 + (duty - 20) / 5.33:
+        #   0%      fan off, below 60C  -> gray, the normal resting state
+        #   1-49%   65-70C              -> green, fan engaged and coping
+        #   50-79%  70-76C              -> yellow, climbing
+        #   80%+    76-80C              -> red, at/near the 80C soft-throttle point
+        # Off is the expected reading on this hardware (heatsink case handles the load
+        # unaided), so a running fan is itself a signal: hot cabinet, or degraded
+        # cooling — dust-clogged fins, loose case, failed thermal pad.
         fan_class, fan_label = make_status_pill(duty_value, [
-            (1, ("gray", "Off")), (50, ("green", "Low")), (80, ("green", "Moderate")), (float('inf'), ("yellow", "High"))
+            (1, ("gray", "Off")), (50, ("green", "Low")), (80, ("yellow", "Moderate")), (float('inf'), ("red", "High"))
         ])
     except Exception:
         fan_class, fan_label = "gray", "Unknown"
