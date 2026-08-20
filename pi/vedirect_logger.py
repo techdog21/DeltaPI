@@ -47,13 +47,19 @@ import RPi.GPIO as GPIO
 FAN_PIN = 18       # GPIO18 (physical pin 12)
 ON_TEMP = 80       # °C (176°F) full speed at 80°C — the SoC's soft-throttle point, so
                    # the fan is flat out exactly when the clock would start dropping
-OFF_TEMP = 60      # °C (140°F) fan off below 60°C. Deliberately well above idle: a
-                   # Zero 2 W measures ~35°C on the bench and stays clear of 60°C even
-                   # in a hot enclosure, and it doesn't throttle until ON_TEMP. Cooling
-                   # below this buys no clock speed — only fan wear, noise and battery
-                   # draw on a solar system. Earlier values (30/50) sat *below* idle,
-                   # which parked the controller in its transition band and cycled the
-                   # fan 0->32%->0 every ~10 min for a ~2°C gain against an 80°C limit.
+OFF_TEMP = 45      # °C (113°F) fan off below 45°C, so it first spins at RAMP_START (50°C).
+                   # Set from a week of logged temps covering a 94°F/34°C afternoon: the
+                   # Pi peaked at 52.1°C, so a 50°C turn-on is the highest that still
+                   # engages the fan on a hot day — replaying that week, turn-on points of
+                   # 55°C and 60°C never fired once. At 50/80 it runs ~21 h across the
+                   # week (12% of the time) at 20-21% duty, on the 3 hot days, with one
+                   # on/off transition each. That is well clear of the 38-40°C overnight
+                   # idle, so it is NOT the old 30/50 failure of parking below idle and
+                   # cycling forever (that ran 100% of the time). Cooling here buys only
+                   # ~1°C — the point is engagement: the fan stays exercised and proven
+                   # instead of sitting untouched for months and first being asked to
+                   # work at 80°C, when a seized bearing is indistinguishable from a
+                   # healthy 0% and there is no time left to find out.
 PWM_FREQ = 25000   # 25 kHz for silent PWM
 FAN_MIN_DUTY = 20  # Minimum speed to reliably spin fan
 FAN_DUTY_DEADBAND = 10  # ignore sub-10% duty changes so the fan doesn't hunt (and
@@ -153,7 +159,7 @@ def setup_fan():
 
 def update_fan(pwm, temp, current_duty):
     """
-    Adjust fan speed for quiet operation targeting 40°C.
+    Adjust fan speed along the OFF_TEMP/ON_TEMP curve (see the constants).
     Fan is completely off below OFF_TEMP. If temp is None (read failed),
     holds the current duty cycle unchanged.
     """

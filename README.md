@@ -224,10 +224,15 @@ fields, Fernet-encrypted date tokens, thread-safe DB cleanup, and no secrets in 
 
 ## Fan control (Pi)
 
-PWM fan on GPIO 18 by CPU temp: off below 60 °C, linear 20→100 % from 65→80 °C, full
+PWM fan on GPIO 18 by CPU temp: off below 45 °C, linear 20→100 % from 50→80 °C, full
 above 80 °C; holds last speed if the temperature can't be read. 80 °C is the SoC's
-soft-throttle point, so the fan is a safety net rather than a continuous cooler — a
-Zero 2 W idles far below the 60 °C turn-off, so it normally sits at 0 %.
+soft-throttle point, so the fan is still a safety net rather than a continuous cooler.
+
+The 50 °C turn-on is set from logged behaviour, not a guess: on a 94 °F day a Zero 2 W
+in a heatsink case peaks around 52 °C, running ~18 °C above cabinet air. Turn-on points
+of 55 or 60 °C therefore never fire at all, which left the fan unexercised for months at
+a time. At 50 °C it engages on hot afternoons only — about 12 % of a hot week, at 20–21 %
+duty, one on/off transition a day — and sits at 0 % the rest of the time.
 
 Note the fan runs at full speed from power-on until the service claims GPIO 18: a
 4-wire fan pulls its own PWM line high, and the pin is an input until then. That's the
