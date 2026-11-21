@@ -268,6 +268,7 @@ def backup_db():
         server_log("GET", f"Rejected backup request: Bad Auth from {client_ip}", "warning")
         return jsonify({"error": "Unauthorized"}), 403
 
+    _remove_stale_backups()
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     # Snapshot into a temp file on the same (persistent) disk as the DB, then
     # gzip it. Solar JSON compresses several-fold, so the download (and the Pi's
@@ -299,20 +300,33 @@ def backup_db():
         except OSError:
             pass
 
+    # The gzip stays on disk while it streams; the next /backup call removes it
+    # (see _remove_stale_backups). send_file passes the file straight through to
+    # the server, so a call_on_close hook never runs and cannot delete it.
     resp = send_file(gz_path, as_attachment=True,
                      download_name=f"vedirect-backup-{ts}.db.gz",
                      mimetype="application/gzip")
-
-    @resp.call_on_close
-    def _cleanup():
-        # Runs after the response has finished streaming to the client.
-        try:
-            os.remove(gz_path)
-        except OSError:
-            pass
-
     server_log("GET", f"Served DB backup to {client_ip}", "info")
     return resp
+
+
+_STALE_BACKUP_SECONDS = 3600  # older than any download in progress could be
+
+
+def _remove_stale_backups():
+    """Delete backup snapshots (backup-*.db and backup-*.db.gz) in DB_DIR older
+    than an hour: the previous call's served gzip, and anything a crashed call
+    left behind."""
+    cutoff = time.time() - _STALE_BACKUP_SECONDS
+    for name in os.listdir(DB_DIR):
+        if not (name.startswith("backup-") and (name.endswith(".db") or name.endswith(".db.gz"))):
+            continue
+        path = os.path.join(DB_DIR, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            pass
 
 
 # Panels render cache. A full panels render (window query + build_context parsing
