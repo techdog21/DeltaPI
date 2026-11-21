@@ -11,7 +11,7 @@ import time as time_module
 from datetime import datetime, timedelta, timezone
 from flask import g
 
-from config import DB_PATH, SEED_LOCATIONS
+from config import DB_PATH, DB_TIMEOUT, SEED_LOCATIONS
 from util import server_log
 
 
@@ -22,7 +22,11 @@ def init_db():
     Adds an index on logs.timestamp for efficient time-based queries.
     Called at application startup.
     """
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+        # WAL lets dashboard reads and Pi uploads run at the same time; in the
+        # default mode a long read made uploads fail with "database is locked".
+        # The setting is stored in the database file, so this is safe to repeat.
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,7 +149,7 @@ def get_db():
     by close_db() at end of request.
     """
     if 'db' not in g:
-        g.db = sqlite3.connect(DB_PATH, check_same_thread=False)
+        g.db = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT, check_same_thread=False)
         g.db.row_factory = sqlite3.Row
     return g.db
 

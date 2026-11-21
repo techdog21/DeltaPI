@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 import requests
 
-from config import DB_PATH, FIRMS_MAP_KEY, NWS_HEADERS
+from config import DB_PATH, DB_TIMEOUT, FIRMS_MAP_KEY, NWS_HEADERS
 from util import server_log, _haversine_mi, _bearing
 
 
@@ -32,7 +32,7 @@ from util import server_log, _haversine_mi, _bearing
 def _db_get(provider, key):
     """(epoch, data) from the persistent tier, or None."""
     try:
-        with sqlite3.connect(DB_PATH, timeout=5) as c:
+        with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as c:
             row = c.execute("SELECT epoch, data FROM ext_cache WHERE provider = ? AND loc_key = ?",
                             (provider, key)).fetchone()
         return (row[0], json.loads(row[1])) if row else None
@@ -43,7 +43,7 @@ def _db_get(provider, key):
 
 def _db_put(provider, key, epoch, data):
     try:
-        with sqlite3.connect(DB_PATH, timeout=5) as c:
+        with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as c:
             c.execute("INSERT OR REPLACE INTO ext_cache (provider, loc_key, epoch, data) VALUES (?,?,?,?)",
                       (provider, key, epoch, json.dumps(data)))
     except Exception as e:

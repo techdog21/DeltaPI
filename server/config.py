@@ -13,6 +13,10 @@ from cryptography.fernet import Fernet
 # ------------------ Paths / storage ------------------ #
 DB_DIR = os.environ.get("DB_DIR", "/data")
 DB_PATH = os.path.join(DB_DIR, "vedirect.db")
+# Seconds a connection waits for another one's write to finish before failing
+# with "database is locked". The default of 5 was too short while a backlog
+# upload and dashboard renders overlapped.
+DB_TIMEOUT = 15
 SERVER_LOG = os.path.join(DB_DIR, "server.log")
 os.makedirs(DB_DIR, exist_ok=True)
 
